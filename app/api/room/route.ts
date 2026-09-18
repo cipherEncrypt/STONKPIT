@@ -1,0 +1,83 @@
+import { NextRequest, NextResponse } from "next/server";
+import { CREATE_ROOM_SIZES, StockId } from "@/lib/constants";
+import { displayNamesForWallets } from "@/lib/display-names";
+import { withDbAsync } from "@/lib/db";
+import { parseRoomId } from "@/lib/room-url";
+import { roomStore } from "@/lib/room-store";
+
+export const dynamic = "force-dynamic";
+
+function roomIdFrom(req: NextRequest): string {
+  return parseRoomId(req.nextUrl.searchParams.get("room"));
+}
+
+async function withDisplayNames(room: import("@/lib/room-store").Room) {
+  const wallets = [
+    ...room.players.map((p) => p.wallet),
+    ...room.results.map((r) => r.wallet),
+  ];
+  const displayNames = await withDbAsync((state) =>
+    displayNamesForWallets(state.wallets, wallets),
+  );
+  return displayNames;
+}
+
+export async function GET(req: NextRequest) {
+  const id = roomIdFrom(req);
+  const { room, serverNow, remainingMs } = await roomStore.get(id);
+  const suggested = await roomStore.suggestOpenRoom(id);
+  const displayNames = await withDisplayNames(room);
+  return NextResponse.json({ room, serverNow, remainingMs, suggestedRoom: suggested, displayNames });
+}
+
+export async function POST(req: NextRequest) {
+  const id = roomIdFrom(req);
+  const body = (await req.json()) as {
+    action: "join" | "reset" | "ready" | "create";
+    wallet?: string;
+    stock?: StockId;
+    maxPlayers?: number;
+  };
+
+  if (body.action === "create") {
+    const max = body.maxPlayers === 8 ? 8 : 5;
+    if (!CREATE_ROOM_SIZES.includes(max as 5 | 8)) {
+      return NextResponse.json({ error: "maxPlayers must be 5 or 8" }, { status: 400 });
+    }
+    const room = await roomStore.create(max as 5 | 8);
+    return NextResponse.json({ room });
+  }
+
+  if (body.action === "reset") {
+    const room = await roomStore.reset(id);
+    const snap = await roomStore.get(id);
+    const displayNames = await withDisplayNames(snap.room);
+    return NextResponse.json({ ...snap, displayNames });
+  }
+
+  if (body.action === "ready") {
+    if (!body.wallet) {
+      return NextResponse.json({ error: "wallet required" }, { status: 400 });
+    }
+    const { room, error, started } = await roomStore.setReady(id, body.wallet);
+    if (error) return NextResponse.json({ room, error }, { status: 400 });
+    const snap = await roomStore.get(id);
+    const displayNames = await withDisplayNames(snap.room);
+    return NextResponse.json({ ...snap, started, displayNames });
+  }
+
+  if (body.action === "join") {
+    if (!body.wallet || !body.stock) {
+      return NextResponse.json({ error: "wallet and stock required" }, { status: 400 });
+    }
+    const { room, error, nextRoom } = await roomStore.join(id, body.wallet, body.stock);
+    if (error) {
+      return NextResponse.json({ room, error, nextRoom }, { status: 400 });
+    }
+    const snap = await roomStore.get(id);
+    const displayNames = await withDisplayNames(snap.room);
+    return NextResponse.json({ ...snap, displayNames });
+  }
+
+  return NextResponse.json({ error: "unknown action" }, { status: 400 });
+}

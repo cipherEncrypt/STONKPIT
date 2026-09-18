@@ -1,0 +1,22 @@
+[toolchain]
+anchor_version = "1.2.0"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.devnet]
+stonkpit = "DVWAgqjsK7jCVWu2ArL6PVcpdvGbdeVCwnsWBJcGFBi"
+
+# Mainnet (flip when funded):
+# [programs.mainnet]
+# stonkpit = "DVWAgqjsK7jCVWu2ArL6PVcpdvGbdeVCwnsWBJcGFBi"
+
+[provider]
+cluster = "devnet"
+wallet = "keys/admin.json"
+
+[scripts]
+test = "cargo test"
+
+[hooks]

@@ -1,0 +1,241 @@
+import fs from "fs";
+import path from "path";
+import { Room } from "./room-store";
+import { usdcToMicro } from "./usdc";
+
+export type WalletRow = {
+  pubkey: string;
+  available: number;
+  frozen: number;
+  username: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type DepositRow = {
+  signature: string;
+  pubkey: string;
+  amount: number;
+  slot: number;
+  createdAt: number;
+};
+
+export type WithdrawalRow = {
+  id: string;
+  pubkey: string;
+  amount: number;
+  status: "pending" | "sent" | "failed";
+  outSignature: string | null;
+  createdAt: number;
+  sentAt: number | null;
+};
+
+export type LedgerRow = {
+  id: string;
+  pubkey: string;
+  type:
+    | "deposit"
+    | "join_freeze"
+    | "payout"
+    | "fee"
+    | "withdraw_request"
+    | "withdraw_sent";
+  amount: number;
+  roomId: string | null;
+  ref: string | null;
+  createdAt: number;
+};
+
+export type DbState = {
+  version: 2;
+  wallets: Record<string, WalletRow>;
+  rooms: Record<string, Room>;
+  deposits: Record<string, DepositRow>;
+  withdrawals: WithdrawalRow[];
+  ledger: LedgerRow[];
+  settledRooms: Record<string, boolean>;
+};
+
+type LegacyBalanceRow = { available: number; frozen: number };
+type LegacyDepositRow = { userId: string; amount: number; creditedAt: number };
+type LegacyWithdrawalRow = {
+  id: string;
+  userId: string;
+  amount: number;
+  status: "pending" | "sent" | "failed";
+  signature: string | null;
+  createdAt: number;
+  sentAt: number | null;
+};
+
+type LegacyDbState = {
+  version?: number;
+  balances?: Record<string, LegacyBalanceRow>;
+  wallets?: Record<string, WalletRow>;
+  rooms?: Record<string, Room>;
+  deposits?: Record<string, LegacyDepositRow | DepositRow>;
+  withdrawals?: LegacyWithdrawalRow[];
+  ledger?: Array<{ userId?: string; pubkey?: string } & LedgerRow>;
+  settledRooms?: Record<string, boolean>;
+};
+
+const DEFAULT_STATE: DbState = {
+  version: 2,
+  wallets: {},
+  rooms: {},
+  deposits: {},
+  withdrawals: [],
+  ledger: [],
+  settledRooms: {},
+};
+
+function dbPath(): string {
+  const raw = process.env.DATABASE_PATH;
+  if (raw) return path.resolve(raw);
+  return path.resolve(process.cwd(), "data", "stonkpit.json");
+}
+
+function ensureDir(file: string): void {
+  const dir = path.dirname(file);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+function migrateLegacy(raw: LegacyDbState): DbState {
+  const now = Date.now();
+  const wallets: Record<string, WalletRow> = {};
+  for (const [pubkey, w] of Object.entries(raw.wallets ?? {})) {
+    wallets[pubkey] = { ...w, username: w.username ?? null };
+  }
+
+  if (raw.balances) {
+    for (const [pubkey, bal] of Object.entries(raw.balances)) {
+      if (pubkey.startsWith("demo:")) continue;
+      const avail =
+        bal.available < 1_000_000 ? usdcToMicro(bal.available) : Math.round(bal.available);
+      const fr =
+        bal.frozen < 1_000_000 ? usdcToMicro(bal.frozen) : Math.round(bal.frozen);
+      wallets[pubkey] = {
+        pubkey,
+        available: avail,
+        frozen: fr,
+        username: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+    }
+  }
+
+  const deposits: Record<string, DepositRow> = {};
+  if (raw.deposits) {
+    for (const [sig, d] of Object.entries(raw.deposits)) {
+      if ("pubkey" in d && d.pubkey) {
+        deposits[sig] = d as DepositRow;
+      } else {
+        const leg = d as LegacyDepositRow;
+        if (leg.userId.startsWith("demo:")) continue;
+        deposits[sig] = {
+          signature: sig,
+          pubkey: leg.userId,
+          amount: leg.amount < 1_000_000 ? usdcToMicro(leg.amount) : Math.round(leg.amount),
+          slot: 0,
+          createdAt: leg.creditedAt ?? now,
+        };
+      }
+    }
+  }
+
+  const withdrawals: WithdrawalRow[] = (raw.withdrawals ?? []).map((w) => {
+    if ("outSignature" in w && "pubkey" in w) return w as WithdrawalRow;
+    const leg = w as LegacyWithdrawalRow;
+    return {
+      id: leg.id,
+      pubkey: leg.userId,
+      amount:
+        leg.amount < 1_000_000 ? usdcToMicro(leg.amount) : Math.round(leg.amount),
+      status: leg.status,
+      outSignature: leg.signature,
+      createdAt: leg.createdAt,
+      sentAt: leg.sentAt,
+    };
+  });
+
+  const ledger: LedgerRow[] = (raw.ledger ?? []).map((e) => ({
+    id: e.id,
+    pubkey: e.pubkey ?? (e as { userId: string }).userId,
+    type: e.type as LedgerRow["type"],
+    amount: e.amount < 1_000_000 && e.type !== "join_freeze" ? usdcToMicro(e.amount) : e.amount,
+    roomId: e.roomId,
+    ref: e.ref,
+    createdAt: e.createdAt,
+  }));
+
+  return {
+    version: 2,
+    wallets,
+    rooms: raw.rooms ?? {},
+    deposits,
+    withdrawals,
+    ledger,
+    settledRooms: raw.settledRooms ?? {},
+  };
+}
+
+let cached: DbState | null = null;
+let cacheMtime = 0;
+
+function loadState(): DbState {
+  const file = dbPath();
+  if (!fs.existsSync(file)) {
+    cached = structuredClone(DEFAULT_STATE);
+    cacheMtime = 0;
+    return cached;
+  }
+  const stat = fs.statSync(file);
+  if (cached && stat.mtimeMs === cacheMtime) return cached;
+  const raw = JSON.parse(fs.readFileSync(file, "utf8")) as LegacyDbState;
+  cached =
+    raw.version === 2 && raw.wallets ? (raw as unknown as DbState) : migrateLegacy(raw);
+  for (const w of Object.values(cached.wallets)) {
+    if (w.username === undefined) w.username = null;
+  }
+  cacheMtime = stat.mtimeMs;
+  return cached;
+}
+
+function saveState(state: DbState): void {
+  const file = dbPath();
+  ensureDir(file);
+  state.version = 2;
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8");
+  fs.renameSync(tmp, file);
+  cached = state;
+  cacheMtime = fs.statSync(file).mtimeMs;
+}
+
+let writeChain: Promise<void> = Promise.resolve();
+
+export async function withDbAsync<T>(fn: (state: DbState) => T | Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    writeChain = writeChain
+      .then(async () => {
+        const state = loadState();
+        const result = await fn(state);
+        saveState(state);
+        resolve(result);
+      })
+      .catch(reject);
+  });
+}
+
+export function ledgerId(): string {
+  return `l_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+export function withdrawalId(): string {
+  return `w_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+export function getDbPath(): string {
+  return dbPath();
+}
