@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { isDemoPlayer } from "./player-id";
 import { Room } from "./room-store";
 import { usdcToMicro } from "./usdc";
 
@@ -36,10 +37,12 @@ export type LedgerRow = {
   type:
     | "deposit"
     | "join_freeze"
+    | "unfreeze"
     | "payout"
     | "fee"
     | "withdraw_request"
-    | "withdraw_sent";
+    | "withdraw_sent"
+    | "withdraw_refund";
   amount: number;
   roomId: string | null;
   ref: string | null;
@@ -180,10 +183,73 @@ function migrateLegacy(raw: LegacyDbState): DbState {
   };
 }
 
+const LOCK_STALE_MS = 30_000;
+const LOCK_WAIT_MS = 10_000;
+
 let cached: DbState | null = null;
 let cacheMtime = 0;
 
-function loadState(): DbState {
+function lockPath(file: string): string {
+  return `${file}.lock`;
+}
+
+function sleepMs(ms: number): void {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    /* spin */
+  }
+}
+
+function acquireFileLock(file: string): void {
+  const lock = lockPath(file);
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  while (Date.now() < deadline) {
+    try {
+      fs.writeFileSync(lock, `${process.pid}:${Date.now()}`, { flag: "wx" });
+      return;
+    } catch {
+      try {
+        const stat = fs.statSync(lock);
+        if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) fs.unlinkSync(lock);
+      } catch {
+        /* lock released */
+      }
+      sleepMs(25);
+    }
+  }
+  throw new Error(`Database lock timeout: ${file}`);
+}
+
+function releaseFileLock(file: string): void {
+  try {
+    fs.unlinkSync(lockPath(file));
+  } catch {
+    /* already released */
+  }
+}
+
+function sanitizeState(state: DbState): void {
+  for (const key of Object.keys(state.wallets)) {
+    if (isDemoPlayer(key)) delete state.wallets[key];
+  }
+  for (const w of Object.values(state.wallets)) {
+    if (w.username === undefined) w.username = null;
+    w.available = Math.round(w.available);
+    w.frozen = Math.round(w.frozen);
+  }
+}
+
+function readStateFromDisk(): DbState {
+  const file = dbPath();
+  if (!fs.existsSync(file)) return structuredClone(DEFAULT_STATE);
+  const raw = JSON.parse(fs.readFileSync(file, "utf8")) as LegacyDbState;
+  const state =
+    raw.version === 2 && raw.wallets ? (raw as unknown as DbState) : migrateLegacy(raw);
+  sanitizeState(state);
+  return state;
+}
+
+function loadState(forceReload = false): DbState {
   const file = dbPath();
   if (!fs.existsSync(file)) {
     cached = structuredClone(DEFAULT_STATE);
@@ -191,13 +257,8 @@ function loadState(): DbState {
     return cached;
   }
   const stat = fs.statSync(file);
-  if (cached && stat.mtimeMs === cacheMtime) return cached;
-  const raw = JSON.parse(fs.readFileSync(file, "utf8")) as LegacyDbState;
-  cached =
-    raw.version === 2 && raw.wallets ? (raw as unknown as DbState) : migrateLegacy(raw);
-  for (const w of Object.values(cached.wallets)) {
-    if (w.username === undefined) w.username = null;
-  }
+  if (!forceReload && cached && stat.mtimeMs === cacheMtime) return cached;
+  cached = readStateFromDisk();
   cacheMtime = stat.mtimeMs;
   return cached;
 }
@@ -205,6 +266,7 @@ function loadState(): DbState {
 function saveState(state: DbState): void {
   const file = dbPath();
   ensureDir(file);
+  sanitizeState(state);
   state.version = 2;
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8");
@@ -219,13 +281,24 @@ export async function withDbAsync<T>(fn: (state: DbState) => T | Promise<T>): Pr
   return new Promise((resolve, reject) => {
     writeChain = writeChain
       .then(async () => {
-        const state = loadState();
-        const result = await fn(state);
-        saveState(state);
-        resolve(result);
+        const file = dbPath();
+        acquireFileLock(file);
+        try {
+          const state = loadState(true);
+          const result = await fn(state);
+          saveState(state);
+          resolve(result);
+        } finally {
+          releaseFileLock(file);
+        }
       })
       .catch(reject);
   });
+}
+
+/** In-memory DB for tests — bypasses disk. */
+export function createTestDbState(): DbState {
+  return structuredClone(DEFAULT_STATE);
 }
 
 export function ledgerId(): string {

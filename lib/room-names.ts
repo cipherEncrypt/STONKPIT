@@ -1,45 +1,40 @@
-import { CreateRoomSize } from "./constants";
-
-export type SeedRoom = {
+/** Fixed pit ladder — exactly five rooms, no user-created rooms. */
+export type PitRoomDef = {
   id: string;
   name: string;
-  maxPlayers: CreateRoomSize;
+  maxPlayers: number;
+  stakeMicro: number;
 };
 
-export const SEED_ROOMS: SeedRoom[] = [
-  { id: "1", name: "Opening Bell", maxPlayers: 5 },
-  { id: "2", name: "After Hours", maxPlayers: 5 },
-  { id: "3", name: "Green Tape", maxPlayers: 5 },
-  { id: "4", name: "Red Pit", maxPlayers: 5 },
-  { id: "5", name: "Tesla Cage", maxPlayers: 8 },
+export const PIT_ROOMS: PitRoomDef[] = [
+  { id: "1", name: "Opening Bell", maxPlayers: 5, stakeMicro: 1_000_000 },
+  { id: "2", name: "After Hours", maxPlayers: 5, stakeMicro: 5_000_000 },
+  { id: "3", name: "Green Tape", maxPlayers: 8, stakeMicro: 10_000_000 },
+  { id: "4", name: "Red Pit", maxPlayers: 15, stakeMicro: 25_000_000 },
+  { id: "5", name: "Tesla Cage", maxPlayers: 20, stakeMicro: 50_000_000 },
 ];
 
-const TEMPLATES_5 = ["Opening Bell", "After Hours", "Green Tape", "Red Pit"];
-const TEMPLATES_8 = ["Tesla Cage"];
+export const PIT_ROOM_IDS = PIT_ROOMS.map((r) => r.id);
 
-/** Next unused room name for a given seat cap. */
-export function nextRoomName(existingNames: string[], maxPlayers: CreateRoomSize): string {
-  const templates = maxPlayers === 8 ? TEMPLATES_8 : TEMPLATES_5;
-  const used = new Set(existingNames);
-
-  for (const base of templates) {
-    if (!used.has(base)) return base;
-  }
-
-  for (const base of templates) {
-    for (let n = 2; n <= 99; n++) {
-      const candidate = `${base} ${n}`;
-      if (!used.has(candidate)) return candidate;
-    }
-  }
-
-  return `${templates[0]} ${Date.now()}`;
+export function pitRoomDef(id: string): PitRoomDef | null {
+  return PIT_ROOMS.find((r) => r.id === id) ?? null;
 }
+
+export function isPitRoomId(id: string): boolean {
+  return PIT_ROOM_IDS.includes(id);
+}
+
+/** @deprecated use pitRoomDef */
+export const SEED_ROOMS = PIT_ROOMS;
 
 export function seedNameForId(id: string): string | null {
-  return SEED_ROOMS.find((s) => s.id === id)?.name ?? null;
+  return pitRoomDef(id)?.name ?? null;
 }
 
-export function seedMaxForId(id: string): CreateRoomSize | null {
-  return SEED_ROOMS.find((s) => s.id === id)?.maxPlayers ?? null;
+export function seedMaxForId(id: string): number | null {
+  return pitRoomDef(id)?.maxPlayers ?? null;
+}
+
+export function seedStakeMicroForId(id: string): number | null {
+  return pitRoomDef(id)?.stakeMicro ?? null;
 }

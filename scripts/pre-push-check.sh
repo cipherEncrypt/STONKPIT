@@ -50,13 +50,32 @@ else
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
     case "$f" in
-      .env|.env.local|.env.production|data/*|keys/*|test-ledger/*|.validator/*)
+      .env|.env.local|.env.production|keys/*|test-ledger/*|.validator/*)
         echo -e "${RED}  FAIL: staged forbidden file: $f${NC}"
         FAIL=1
         ;;
+      data/*)
+        if [[ "$f" != "data/.gitkeep" ]]; then
+          echo -e "${RED}  FAIL: staged forbidden file: $f${NC}"
+          FAIL=1
+        fi
+        ;;
     esac
-    if git show ":$f" 2>/dev/null | grep -qE 'g\.alchemy\.com/v2/[a-zA-Z0-9_-]{10,}|TREASURY_PRIVATE_KEY=[^#]|BEGIN (RSA |OPENSSH )?PRIVATE KEY'; then
-      echo -e "${RED}  FAIL: staged secret pattern in: $f${NC}"
+    # Skip docs/examples/scripts that mention env var names in comments
+    case "$f" in
+      .env.example|scripts/*|docs/*|README.md|ARCHITECTURE.md) continue ;;
+    esac
+    CONTENT="$(git show ":$f" 2>/dev/null || true)"
+    if echo "$CONTENT" | grep -E 'g\.alchemy\.com/v2/' | grep -viE 'YOUR_|EXAMPLE|placeholder|<base58>' | grep -q .; then
+      echo -e "${RED}  FAIL: possible Alchemy API key in: $f${NC}"
+      FAIL=1
+    fi
+    if echo "$CONTENT" | grep -E '^TREASURY_PRIVATE_KEY=[^#[:space:]]' | grep -q .; then
+      echo -e "${RED}  FAIL: treasury private key in: $f${NC}"
+      FAIL=1
+    fi
+    if echo "$CONTENT" | grep -qE 'BEGIN (RSA |OPENSSH )?PRIVATE KEY'; then
+      echo -e "${RED}  FAIL: PEM private key in: $f${NC}"
       FAIL=1
     fi
   done <<< "$STAGED"

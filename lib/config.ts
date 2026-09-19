@@ -1,6 +1,7 @@
 import { serverRpcUrl } from "./rpc";
 
-const DEFAULT_ROOM_DURATION = 300;
+/** All pits — 3 minutes unless overridden in env. */
+const DEFAULT_ROOM_DURATION = 180;
 
 export type AppConfig = {
   rpcUrl: string;
@@ -8,10 +9,23 @@ export type AppConfig = {
   roomDurationSecs: number;
 };
 
+function parseDurationSecs(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Server timer + endTs — keep in sync with NEXT_PUBLIC_ROOM_DURATION. */
 export function roomDurationSecs(): number {
-  const raw = process.env.ROOM_DURATION;
-  const n = raw ? parseInt(raw, 10) : DEFAULT_ROOM_DURATION;
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_ROOM_DURATION;
+  return (
+    parseDurationSecs(process.env.ROOM_DURATION) ??
+    parseDurationSecs(process.env.NEXT_PUBLIC_ROOM_DURATION) ??
+    DEFAULT_ROOM_DURATION
+  );
+}
+
+export function roomDurationMs(): number {
+  return roomDurationSecs() * 1000;
 }
 
 export function treasuryAddress(): string | null {

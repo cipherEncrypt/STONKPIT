@@ -10,12 +10,42 @@ export function formatBps(bps: number): string {
   return `${sign}${pct.toFixed(2)}%`;
 }
 
+/** Pit / FINAL: integer bps + % to 4 decimals (sub-cent moves visible). */
+export function moveBpsFromPrices(start: number, live: number): number {
+  if (start <= 0) return 0;
+  return ((live - start) / start) * 10_000;
+}
+
+export function formatMoveDisplay(bps: number): string {
+  const bpsRounded = Math.round(bps);
+  const pct = bps / 100;
+  const signBps = bpsRounded >= 0 ? "+" : "";
+  const signPct = pct >= 0 ? "+" : "";
+  return `${signBps}${bpsRounded} bps (${signPct}${pct.toFixed(4)}%)`;
+}
+
+export function formatBpsHero(bps: number): string {
+  const bpsRounded = Math.round(bps);
+  const sign = bpsRounded >= 0 ? "+" : "";
+  return `${sign}${bpsRounded} bps`;
+}
+
 export function formatUsd(price: number): string {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
+  }).format(price);
+}
+
+/** Live pit prices — at least 4 decimal places. */
+export function formatUsdPit(price: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 4,
+    maximumFractionDigits: 6,
   }).format(price);
 }
 

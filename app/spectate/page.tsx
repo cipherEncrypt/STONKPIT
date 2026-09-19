@@ -6,6 +6,7 @@ import { DemoJoin } from "@/components/DemoJoin";
 import { usePlayerId } from "@/components/usePlayerId";
 import { useRooms } from "@/components/useRooms";
 import { useRoomId } from "@/components/useRoomId";
+import { formatStakeUsd } from "@/lib/format-stake";
 import { formatRemaining } from "@/lib/room-clock";
 import { roomHref } from "@/lib/room-url";
 
@@ -23,7 +24,7 @@ function SpectateContent() {
   return (
     <div className="space-y-6">
       <section className="border-b border-pit-border pb-5">
-        <Link href="/" className="font-mono text-sm text-pit-muted">
+        <Link href="/rooms" className="font-mono text-sm text-pit-muted">
           ← Main lobby
         </Link>
         <h1 className="display-type mt-3 text-4xl leading-none">Spectate</h1>
@@ -45,7 +46,7 @@ function SpectateContent() {
             {rooms.map((r) => (
               <Link
                 key={r.id}
-                href={roomHref("/", r.id)}
+                href={roomHref("/rooms", r.id)}
                 className={`block min-h-11 border border-pit-border bg-pit-bg p-4 active:bg-white/5 ${
                   r.id === roomId ? "border-pit-green/60 bg-pit-green/5" : ""
                 }`}
@@ -61,6 +62,7 @@ function SpectateContent() {
                   </span>
                 </div>
                 <div className="mt-2 flex flex-wrap gap-x-3 font-mono text-sm text-pit-muted">
+                  <span className="text-pit-green">{formatStakeUsd(r.stakeMicro)}</span>
                   <span>
                     {String(r.seated).padStart(2, "0")} / {String(r.maxPlayers).padStart(2, "0")}
                   </span>

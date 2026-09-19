@@ -8,26 +8,30 @@ Timed pit on **Solana mainnet**. Pick **AAPLx / TSLAx / NVDAx**, scored by **liv
 
 1. **Connect wallet** (main path — no demo name on home)
 2. **Choose handle** if this pubkey has no username yet (3–16 chars, `[a-zA-Z0-9_]`, unique, stored on wallet row)
-3. See **named rooms** + credits
-4. Enter a room → **pick stock** → **READY**
+3. See **five named pits** + credits
+4. Enter a pit → **pick stock** → **READY**
 
 **Spectate:** small link *spectate without money* → `/spectate` — demo seats only (no freeze, deposit, or payout).
 
 Fighter lists show **handles**, not raw pubkeys.
 
-## Multi-room lobby
+## Five pits (fixed ladder)
 
-| Item | Detail |
-|------|--------|
-| Lobby | Named room cards: name, `03 / 05`, OPEN / LIVE / FINAL |
-| Seed rooms | Opening Bell (5), After Hours (5), Green Tape (5), Red Pit (5), Tesla Cage (8) |
-| **+ ROOM** | Next unused name from seed list (then Green Tape 2, …); pick max **5** or **8** |
-| Share link | `?room=<id>` (numeric id in URL; UI shows name) |
-| Full / LIVE | **+ ROOM** or **Open new room** |
+Users **cannot create rooms**. Exactly five pits exist:
+
+| Pit | Seats | Stake |
+|-----|-------|-------|
+| Opening Bell | 5 | $1 |
+| After Hours | 5 | $5 |
+| Green Tape | 8 | $10 |
+| Red Pit | 15 | $25 |
+| Tesla Cage | 20 | $50 |
+
+Lobby cards show **name**, **$stake**, `03 / 05`, OPEN / LIVE / FINAL. Share link: `?room=<id>` (1–5).
 
 ## Seats & ready
 
-1. **Join + pick ticker** → seated, `ready: false`, **1.00 credit frozen** (wallet only)
+1. **Join + pick ticker** → seated, `ready: false`, **that pit’s stake frozen** (wallet only)
 2. Same ticker allowed on multiple seats
 3. Click **READY** on lobby when seated
 4. Pit goes **LIVE** when:
@@ -35,13 +39,14 @@ Fighter lists show **handles**, not raw pubkeys.
    - n === **maxPlayers** (room full auto-start)
 5. Cannot join LIVE/FINAL or when seated ≥ max
 6. Wallet join requires a **handle** set
+7. Reject join if `available < stakeMicro` (e.g. *Need $25 for Red Pit.*)
 
 ## Realtime sync
 
 - Lobby, pit, result poll **`GET /api/room?room=`** every **1s**
 - Home polls **`GET /api/rooms`** every **1s**
 - Countdown from server **`endTs`** (ms) — not a per-tab local timer
-- API returns **`serverNow`** + **`remainingMs`** + **`displayNames`** each poll
+- API returns **`serverNow`** + **`remainingMs`** + **`displayNames`** + **`stakeMicro`** each poll
 
 ## Scoring
 
@@ -53,27 +58,32 @@ Pyth **Crypto.*X/USD** at lock and timer end.
 
 ## Payout (credits)
 
+**n** = wallet players seated in that fight (demo/spectate excluded). Empty seats add **$0**. A pit can go LIVE before full when all seated click READY.
+
 ```
-pot = n × 1.00 · prize pool = pot × 0.97 · 3% fee → treasury
+pot = n × stakeMicro
+prize pool = floor(pot × 97 / 100)   // integer micro-USDC
 ```
+
+Split percents use **n**, not maxPlayers. Unpaid place pots, integer dust, and the 3% fee → treasury.
 
 | n | Split |
 |---|-------|
 | 2 | 100% |
 | 3 | 60 / 30 / 10 |
-| 4–5 | 50 / 30 / 20 |
+| 4–5 | 50 / 30 / 20 (4th/5th $0) |
 | 6–10 | 40 / 25 / 15 / 10 / 10 |
-| 11+ | 40 / 25 / 15 / 20% split places 4–8 |
+| 11+ | 40 / 25 / 15 / 20% split equally places 4–8 |
 
-Ties split that place. **Credit Δ** = payout − 1.00 seat.
+**Ties** combine place pots (e.g. two-way tie for 1st splits 1st+2nd %). **Credit Δ** = payout − seat stake (that pit’s stakeMicro).
 
-## Demo spectate (3 tabs, room 1)
+## Demo spectate (3 tabs, Opening Bell)
 
 ```bash
-ROOM_DURATION=60 npm run dev
+ROOM_DURATION=180 NEXT_PUBLIC_ROOM_DURATION=180 npm run dev
 ```
 
-Open `/spectate`, set demo names, then join room **Opening Bell** (`?room=1`).
+Open `/spectate`, set demo names, then join **Opening Bell** (`?room=1`).
 
 | Tab | Name | Ticker | Action |
 |-----|------|--------|--------|
@@ -81,9 +91,7 @@ Open `/spectate`, set demo names, then join room **Opening Bell** (`?room=1`).
 | 2 | Bob | TSLAx | join → READY |
 | 3 | Cara | NVDAx | join → READY → all ready → LIVE |
 
-All tabs show same fighters, READY marks, and countdown within ~1s.
-
-6th player: Opening Bell full → **+ Room (5)** → e.g. `?room=6` with auto name.
+6th player: Opening Bell full → try **After Hours** (`?room=2`) or another pit.
 
 ## Money (wallet only)
 
@@ -91,6 +99,6 @@ All tabs show same fighters, READY marks, and countdown within ~1s.
 - Amounts stored as **micro-USDC** integers (1.00 = 1_000_000)
 - **Deposit:** client signs SPL `transfer_checked` → `POST /api/wallet/deposit` → server verifies on mainnet RPC
 - **Demo spectate:** may join pits for testing — **no freeze, no deposit, no payout**
-- **Join (wallet):** freeze 1.00 USDC credit; reject if available < 1.00
+- **Join (wallet):** freeze pit stake; reject if available < stake
 - **Withdraw:** `POST /api/wallet/withdraw` → admin `npm run payout`
-- Footer: *Funds are custodial in the treasury wallet. Not a program escrow.*
+- Footer: *USDC for pits and payouts is held in escrow until withdraw or pot settlement.*

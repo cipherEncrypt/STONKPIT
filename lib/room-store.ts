@@ -1,21 +1,23 @@
 import { roomDurationSecs } from "./config";
-import { CreateRoomSize, MIN_PLAYERS, StockId } from "./constants";
+import { MIN_PLAYERS, StockId } from "./constants";
 import {
   applySettleCredits,
   freezeForJoin,
+  refundFrozenStakes,
   SettleCreditsResult,
 } from "./credits";
 import { withDbAsync } from "./db";
 import { isDemoPlayer } from "./player-id";
 import {
-  nextRoomName,
-  SEED_ROOMS,
-  seedMaxForId,
-  seedNameForId,
+  PIT_ROOM_IDS,
+  PIT_ROOMS,
+  pitRoomDef,
+  PitRoomDef,
 } from "./room-names";
-import { microToUsdc, STAKE_MICRO } from "./usdc";
+import { microToUsdc } from "./usdc";
 import { remainingMs, serverNowMs } from "./room-clock";
-import { fetchAllCryptoPrices } from "./pyth";
+import { fightMarketQuote, PriceSource, resolveMarketPrice } from "./market-price";
+import { feedAgeSeconds } from "./pyth-feed-status";
 import { scoreBps } from "./scoring";
 
 export type RoomStatus = "open" | "locked" | "ended";
@@ -31,6 +33,7 @@ export type PriceSnapshot = {
   price: number;
   publishTime: number;
   feedName: string;
+  priceSource: PriceSource;
 };
 
 export type PlayerResult = Player & {
@@ -48,6 +51,7 @@ export type Room = {
   id: string;
   name: string;
   maxPlayers: number;
+  stakeMicro: number;
   status: RoomStatus;
   players: Player[];
   startTs: number | null;
@@ -65,17 +69,19 @@ export type RoomSummary = {
   id: string;
   name: string;
   maxPlayers: number;
+  stakeMicro: number;
   seated: number;
   readyCount: number;
   status: RoomStatus;
   remainingMs: number;
 };
 
-function emptyRoom(id: string, maxPlayers: number, name: string): Room {
+function emptyRoom(def: PitRoomDef): Room {
   return {
-    id,
-    name,
-    maxPlayers,
+    id: def.id,
+    name: def.name,
+    maxPlayers: def.maxPlayers,
+    stakeMicro: def.stakeMicro,
     status: "open",
     players: [],
     startTs: null,
@@ -89,13 +95,22 @@ function emptyRoom(id: string, maxPlayers: number, name: string): Room {
   };
 }
 
+function applyDefConfig(r: Room, def: PitRoomDef): Room {
+  r.name = def.name;
+  r.maxPlayers = def.maxPlayers;
+  r.stakeMicro = def.stakeMicro;
+  return r;
+}
+
 function migrateRoom(raw: Room & { lockTs?: number | null }): Room {
+  const def = pitRoomDef(raw.id);
   const r = { ...raw };
-  if (!r.name) {
-    r.name = seedNameForId(r.id) ?? `Pit ${r.id}`;
-  }
-  if (r.maxPlayers == null) {
-    r.maxPlayers = seedMaxForId(r.id) ?? 5;
+  if (def) {
+    applyDefConfig(r, def);
+  } else {
+    r.name = r.name ?? `Pit ${r.id}`;
+    r.maxPlayers = r.maxPlayers ?? 5;
+    r.stakeMicro = r.stakeMicro ?? 1_000_000;
   }
   r.players = r.players.map((p) => ({
     ...p,
@@ -110,31 +125,60 @@ function migrateRoom(raw: Room & { lockTs?: number | null }): Room {
   return r;
 }
 
+const PYTH_LIVE_MAX_AGE_SEC = 120;
+
+/** Re-freeze fights that locked on stale on-chain Pyth before Jupiter wiring. */
+async function repairLegacyLockedQuotes(r: Room): Promise<void> {
+  if (r.status !== "locked") return;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const stocks = [...new Set(r.players.map((p) => p.stock))];
+  for (const s of stocks) {
+    const tier = await resolveMarketPrice(s);
+    const q = r.startQuotes[s];
+    const age = q?.publishTime ? feedAgeSeconds(q.publishTime, nowSec) : Number.POSITIVE_INFINITY;
+    const needsRepair =
+      !q ||
+      !q.priceSource ||
+      q.priceSource === "PYTH_STALE" ||
+      (age > 120 && tier.priceSource === "JUPITER" && q.priceSource !== "JUPITER") ||
+      (q.priceSource === "PYTH" && age > PYTH_LIVE_MAX_AGE_SEC && tier.priceSource === "JUPITER");
+    if (!needsRepair) continue;
+    r.startPrices[s] = tier.price;
+    r.startQuotes[s] = {
+      price: tier.price,
+      publishTime: tier.publishTime,
+      feedName: tier.feedName,
+      priceSource: tier.priceSource,
+    };
+  }
+}
+
 function ensureSeedRooms(state: { rooms: Record<string, Room> }): void {
-  for (const seed of SEED_ROOMS) {
-    if (!state.rooms[seed.id]) {
-      state.rooms[seed.id] = emptyRoom(seed.id, seed.maxPlayers, seed.name);
+  for (const def of PIT_ROOMS) {
+    if (!state.rooms[def.id]) {
+      state.rooms[def.id] = emptyRoom(def);
     } else {
-      const r = migrateRoom(state.rooms[seed.id]);
-      if (!state.rooms[seed.id].name) r.name = seed.name;
-      if (!state.rooms[seed.id].maxPlayers) r.maxPlayers = seed.maxPlayers;
-      state.rooms[seed.id] = r;
+      const r = migrateRoom(state.rooms[def.id]);
+      applyDefConfig(r, def);
+      state.rooms[def.id] = r;
     }
   }
 }
 
-function nextRoomHint(state: { rooms: Record<string, Room> }, currentId: string): string {
-  const n = parseInt(currentId, 10);
-  const start = Number.isFinite(n) ? n + 1 : 2;
-  for (let i = start; i <= start + 50; i++) {
-    const id = String(i);
+function nextOpenRoomHint(state: { rooms: Record<string, Room> }, afterId: string): string {
+  const startIdx = PIT_ROOM_IDS.indexOf(afterId);
+  const order =
+    startIdx >= 0
+      ? [...PIT_ROOM_IDS.slice(startIdx + 1), ...PIT_ROOM_IDS.slice(0, startIdx + 1)]
+      : PIT_ROOM_IDS;
+
+  for (const id of order) {
     const raw = state.rooms[id];
-    if (!raw) return id;
+    if (!raw) continue;
     const r = migrateRoom(raw);
     if (r.status === "open" && r.players.length < r.maxPlayers) return id;
   }
-  const ids = Object.keys(state.rooms).map(Number).filter(Number.isFinite);
-  return String(ids.length ? Math.max(...ids) + 1 : 6);
+  return PIT_ROOM_IDS[0];
 }
 
 function cloneRoom(r: Room): Room {
@@ -143,16 +187,16 @@ function cloneRoom(r: Room): Room {
 
 function getRoomFromState(state: { rooms: Record<string, Room> }, id: string): Room {
   ensureSeedRooms(state);
-  if (!state.rooms[id]) {
-    const name = seedNameForId(id) ?? nextRoomName(
-      Object.values(state.rooms).map((r) => migrateRoom(r).name),
-      5,
-    );
-    state.rooms[id] = emptyRoom(id, seedMaxForId(id) ?? 5, name);
+  const def = pitRoomDef(id) ?? PIT_ROOMS[0];
+  const roomId = def.id;
+  if (!state.rooms[roomId]) {
+    state.rooms[roomId] = emptyRoom(def);
   } else {
-    state.rooms[id] = migrateRoom(state.rooms[id]);
+    const r = migrateRoom(state.rooms[roomId]);
+    applyDefConfig(r, def);
+    state.rooms[roomId] = r;
   }
-  return state.rooms[id];
+  return state.rooms[roomId];
 }
 
 function walletHasUsername(
@@ -168,19 +212,17 @@ async function lockRoom(state: { rooms: Record<string, Room> }, id: string): Pro
   if (r.status !== "open") return;
 
   const stocks = [...new Set(r.players.map((p) => p.stock))];
-  const quotes = await fetchAllCryptoPrices();
   const startPrices: Partial<Record<StockId, number>> = {};
   const startQuotes: Partial<Record<StockId, PriceSnapshot>> = {};
   for (const s of stocks) {
-    const q = quotes[s];
-    if (q) {
-      startPrices[s] = q.price;
-      startQuotes[s] = {
-        price: q.price,
-        publishTime: q.publishTime,
-        feedName: q.feedName,
-      };
-    }
+    const q = await fightMarketQuote(s);
+    startPrices[s] = q.price;
+    startQuotes[s] = {
+      price: q.price,
+      publishTime: q.publishTime,
+      feedName: q.feedName,
+      priceSource: q.priceSource,
+    };
   }
 
   const now = serverNowMs();
@@ -218,22 +260,27 @@ async function settleRoom(
   id: string,
 ): Promise<void> {
   const r = getRoomFromState(state, id);
+  if (r.status === "ended") return;
   if (r.status !== "locked") return;
+  if (state.settledRooms[id]) {
+    r.status = "ended";
+    return;
+  }
 
   const stocks = [...new Set(r.players.map((p) => p.stock))];
-  const quotes = await fetchAllCryptoPrices();
   const endPrices: Partial<Record<StockId, number>> = {};
   const endQuotes: Partial<Record<StockId, PriceSnapshot>> = {};
   for (const s of stocks) {
-    const q = quotes[s];
-    if (q) {
-      endPrices[s] = q.price;
-      endQuotes[s] = {
-        price: q.price,
-        publishTime: q.publishTime,
-        feedName: q.feedName,
-      };
-    }
+    const src = r.startQuotes[s]?.priceSource;
+    if (!src) continue;
+    const q = await fightMarketQuote(s, src);
+    endPrices[s] = q.price;
+    endQuotes[s] = {
+      price: q.price,
+      publishTime: q.publishTime,
+      feedName: q.feedName,
+      priceSource: q.priceSource,
+    };
   }
   r.endPrices = endPrices;
   r.endQuotes = endQuotes;
@@ -259,7 +306,7 @@ async function settleRoom(
     if (res.scoreBps > best) best = res.scoreBps;
   }
 
-  const settleCredits = applySettleCredits(state, id, results);
+  const settleCredits = applySettleCredits(state, id, results, r.stakeMicro);
   if (settleCredits) {
     for (const res of results) {
       if (isDemoPlayer(res.wallet)) {
@@ -267,7 +314,7 @@ async function settleRoom(
         res.payoutCredits = 0;
       } else {
         res.creditDelta =
-          settleCredits.creditDeltas[res.wallet] ?? -microToUsdc(STAKE_MICRO);
+          settleCredits.creditDeltas[res.wallet] ?? -microToUsdc(r.stakeMicro);
         res.payoutCredits = settleCredits.payouts[res.wallet] ?? 0;
       }
     }
@@ -284,6 +331,7 @@ function toSummary(room: Room, nowMs: number): RoomSummary {
     id: room.id,
     name: room.name,
     maxPlayers: room.maxPlayers,
+    stakeMicro: room.stakeMicro,
     seated: room.players.length,
     readyCount: room.players.filter((p) => p.ready).length,
     status: room.status,
@@ -292,10 +340,39 @@ function toSummary(room: Room, nowMs: number): RoomSummary {
 }
 
 export const roomStore = {
+  async liveMarketQuotes(
+    id: string,
+  ): Promise<{
+    room: Room;
+    live: Partial<Record<StockId, import("./market-price").MarketQuote>>;
+  }> {
+    return withDbAsync(async (state) => {
+      const r = getRoomFromState(state, id);
+      if (r.status === "locked") {
+        await repairLegacyLockedQuotes(r);
+      }
+      const stocks = [...new Set(r.players.map((p) => p.stock))];
+      const live: Partial<Record<StockId, import("./market-price").MarketQuote>> = {};
+      for (const s of stocks) {
+        const src = r.startQuotes[s]?.priceSource;
+        if (!src) {
+          const snap = await fightMarketQuote(s);
+          live[s] = snap;
+          continue;
+        }
+        live[s] = await fightMarketQuote(s, src);
+      }
+      return { room: cloneRoom(r), live };
+    });
+  },
+
   async get(id: string): Promise<{ room: Room; serverNow: number; remainingMs: number }> {
     return withDbAsync(async (state) => {
       const now = serverNowMs();
       const r = getRoomFromState(state, id);
+      if (r.status === "locked") {
+        await repairLegacyLockedQuotes(r);
+      }
       if (r.status === "locked" && r.endTs && now >= r.endTs) {
         try {
           await settleRoom(state, id);
@@ -312,8 +389,11 @@ export const roomStore = {
     return withDbAsync(async (state) => {
       const now = serverNowMs();
       ensureSeedRooms(state);
-      for (const id of Object.keys(state.rooms)) {
+      for (const id of PIT_ROOM_IDS) {
         const r = getRoomFromState(state, id);
+        if (r.status === "locked") {
+          await repairLegacyLockedQuotes(r);
+        }
         if (r.status === "locked" && r.endTs && now >= r.endTs) {
           try {
             await settleRoom(state, id);
@@ -322,31 +402,28 @@ export const roomStore = {
           }
         }
       }
-      const rooms = Object.values(state.rooms)
-        .map((r) => migrateRoom(r))
-        .sort((a, b) => parseInt(a.id, 10) - parseInt(b.id, 10))
-        .map((r) => toSummary(r, now));
+      const rooms = PIT_ROOM_IDS
+        .map((id) => toSummary(migrateRoom(getRoomFromState(state, id)), now));
       return { rooms, serverNow: now };
-    });
-  },
-
-  async create(maxPlayers: CreateRoomSize): Promise<Room> {
-    return withDbAsync((state) => {
-      ensureSeedRooms(state);
-      const ids = Object.keys(state.rooms).map(Number).filter(Number.isFinite);
-      const id = String(ids.length ? Math.max(...ids) + 1 : 6);
-      const names = Object.values(state.rooms).map((r) => migrateRoom(r).name);
-      const name = nextRoomName(names, maxPlayers);
-      state.rooms[id] = emptyRoom(id, maxPlayers, name);
-      return cloneRoom(state.rooms[id]);
     });
   },
 
   async reset(id: string): Promise<Room> {
     return withDbAsync((state) => {
-      const prev = migrateRoom(getRoomFromState(state, id));
-      state.rooms[id] = emptyRoom(id, prev.maxPlayers, prev.name);
-      return cloneRoom(state.rooms[id]);
+      const def = pitRoomDef(id) ?? PIT_ROOMS[0];
+      const roomId = def.id;
+      const existing = getRoomFromState(state, roomId);
+      if (existing.status !== "ended" && !state.settledRooms[roomId]) {
+        refundFrozenStakes(
+          state,
+          roomId,
+          existing.players.map((p) => p.wallet),
+          existing.stakeMicro,
+        );
+      }
+      delete state.settledRooms[roomId];
+      state.rooms[roomId] = emptyRoom(def);
+      return cloneRoom(state.rooms[roomId]);
     });
   },
 
@@ -364,7 +441,7 @@ export const roomStore = {
         };
       }
       if (r.status !== "open") {
-        const next = nextRoomHint(state, id);
+        const next = nextOpenRoomHint(state, id);
         return {
           room: cloneRoom(r),
           error: `${r.name} is live. Try another room.`,
@@ -375,7 +452,7 @@ export const roomStore = {
         return { room: cloneRoom(r), error: "Already in this room." };
       }
       if (r.players.length >= r.maxPlayers) {
-        const next = nextRoomHint(state, id);
+        const next = nextOpenRoomHint(state, id);
         return {
           room: cloneRoom(r),
           error: `${r.name} is full (${r.maxPlayers}/${r.maxPlayers}).`,
@@ -383,7 +460,7 @@ export const roomStore = {
         };
       }
 
-      const freeze = freezeForJoin(state, wallet, id);
+      const freeze = freezeForJoin(state, wallet, id, r.stakeMicro, r.name);
       if (!freeze.ok) {
         return { room: cloneRoom(r), error: freeze.error };
       }
@@ -444,14 +521,7 @@ export const roomStore = {
       };
       const direct = tryId(preferredId);
       if (direct) return direct;
-      const base = parseInt(preferredId, 10);
-      const start = Number.isFinite(base) ? base : 1;
-      for (let i = start; i <= start + 50; i++) {
-        const open = tryId(String(i));
-        if (open) return open;
-      }
-      const ids = Object.keys(state.rooms).map(Number).filter(Number.isFinite);
-      return String(ids.length ? Math.max(...ids) + 1 : 6);
+      return nextOpenRoomHint(state, preferredId);
     });
   },
 };

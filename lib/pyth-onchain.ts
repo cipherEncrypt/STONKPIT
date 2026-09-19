@@ -58,7 +58,7 @@ const PYTH_RECEIVER_IDL = {
 
 const accountCoder = new BorshAccountsCoder(PYTH_RECEIVER_IDL as never);
 
-function feedAccountAddress(shardId: number, feedIdHex: string): PublicKey {
+export function feedAccountAddress(shardId: number, feedIdHex: string): PublicKey {
   const feedId = Buffer.from(feedIdHex, "hex");
   const shard = Buffer.alloc(2);
   shard.writeUint16LE(shardId, 0);

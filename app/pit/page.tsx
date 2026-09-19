@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { PriceFeed } from "@/components/PriceFeed";
@@ -9,11 +9,21 @@ import { useRoomId } from "@/components/useRoomId";
 import { usePlayerId } from "@/components/usePlayerId";
 import { MIN_PLAYERS, STOCKS, StockId } from "@/lib/constants";
 import { displayPlayer } from "@/lib/player-id";
+import { MarketQuote } from "@/lib/market-price";
+import { formatMarketStatusLine, formatPriceSourceLabel } from "@/lib/price-source-label";
 import { PythQuote } from "@/lib/pyth";
+import { formatStakeUsd } from "@/lib/format-stake";
 import { formatRemaining } from "@/lib/room-clock";
 import { roomHref } from "@/lib/room-url";
-import { formatBps, formatUsd } from "@/lib/scoring";
+import {
+  formatMoveDisplay,
+  moveBpsFromPrices,
+  formatUsdPit,
+} from "@/lib/scoring";
+import { ResultOutcomeToast } from "@/components/ResultOutcomeToast";
 import { StickyReadyBar } from "@/components/StickyReadyBar";
+import { MiniCandles } from "@/components/MiniCandles";
+import { addSample, lastCandles, MinuteCandle } from "@/lib/candles";
 
 function fighterLabel(wallet: string, displayNames: Record<string, string>): string {
   return displayNames[wallet] ?? displayPlayer(wallet);
@@ -23,15 +33,23 @@ function PitContent() {
   const router = useRouter();
   const roomId = useRoomId();
   const { playerId } = usePlayerId();
-  const { room, remainingMs, getRemainingMs, displayNames, setReady } = useRoom(roomId);
+  const { room, remainingMs, getRemainingMs, displayNames, setReady } = useRoom(roomId, 1000);
   const [displayMs, setDisplayMs] = useState(0);
   const [readyBusy, setReadyBusy] = useState(false);
   const [live, setLive] = useState<
-    Partial<Record<StockId, { crypto: PythQuote; equity: PythQuote }>>
+    Partial<
+      Record<
+        StockId,
+        { quotes?: { crypto: PythQuote; equity: PythQuote }; scoring: MarketQuote }
+      >
+    >
   >({});
+  const [tapeCandles, setTapeCandles] = useState<Partial<Record<StockId, MinuteCandle[]>>>({});
+  const fightKeyRef = useRef<string | null>(null);
+  const tapeRef = useRef<Partial<Record<StockId, MinuteCandle[]>>>({});
 
   const resultHref = roomHref("/result", roomId);
-  const lobbyHref = roomHref("/", roomId);
+  const lobbyHref = roomHref("/rooms", roomId);
 
   const me = playerId ? room?.players.find((p) => p.wallet === playerId) : null;
   const showStickyReady = !!(me && !me.ready && room?.status === "open");
@@ -54,35 +72,96 @@ function PitContent() {
     [room?.players],
   );
 
+  /** Reset tape when a new LIVE round starts. */
   useEffect(() => {
-    if (!stocksInPlay.length) return;
-    const load = () => {
-      for (const id of stocksInPlay) {
-        fetch(`/api/prices?stock=${id}`)
-          .then((r) => r.json())
-          .then((d) => {
-            if (d.quotes) setLive((prev) => ({ ...prev, [id]: d.quotes }));
-          })
-          .catch(() => {});
+    if (room?.status !== "locked" || !room.startTs) return;
+    const key = `${room.id}:${room.startTs}`;
+    if (fightKeyRef.current === key) return;
+    fightKeyRef.current = key;
+    tapeRef.current = {};
+    setTapeCandles({});
+  }, [room?.status, room?.id, room?.startTs]);
+
+  /** Server-authoritative live prices — fightMarketQuote + frozen startQuotes. */
+  useEffect(() => {
+    if (room?.status !== "locked" || !stocksInPlay.length) return;
+
+    let cancelled = false;
+
+    const load = async () => {
+      const sampleTs = Date.now();
+      const candlePatches: Partial<Record<StockId, MinuteCandle[]>> = {};
+      const livePatches: Partial<
+        Record<
+          StockId,
+          { quotes?: { crypto: PythQuote; equity: PythQuote }; scoring: MarketQuote }
+        >
+      > = {};
+
+      try {
+        const res = await fetch(`/api/room/live-prices?room=${roomId}`, { cache: "no-store" });
+        const d = (await res.json()) as {
+          error?: string;
+          live?: Partial<Record<StockId, MarketQuote>>;
+        };
+        if (cancelled || d.error || !d.live) return;
+
+        for (const id of stocksInPlay) {
+          const q = d.live[id];
+          if (!q) continue;
+          livePatches[id] = { scoring: q };
+
+          const prevCandles = tapeRef.current[id] ?? [];
+          const next = addSample(prevCandles, {
+            ts: sampleTs,
+            price: q.price,
+            publishTime: q.publishTime,
+          });
+          tapeRef.current[id] = next;
+          candlePatches[id] = next;
+        }
+      } catch {
+        /* retry next poll */
+      }
+
+      if (!cancelled) {
+        if (Object.keys(livePatches).length) {
+          setLive((prev) => ({ ...prev, ...livePatches }));
+        }
+        if (Object.keys(candlePatches).length) {
+          setTapeCandles((prev) => ({ ...prev, ...candlePatches }));
+        }
       }
     };
-    load();
-    const id = setInterval(load, 3000);
-    return () => clearInterval(id);
-  }, [stocksInPlay]);
+
+    void load();
+    const id = setInterval(() => void load(), 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [room?.status, stocksInPlay, roomId]);
 
   const liveRows = useMemo(() => {
     if (!room) return [];
     return room.players
       .map((p) => {
-        const start = room.startPrices[p.stock];
-        const liveQ = live[p.stock]?.crypto;
+        const startQ = room.startQuotes[p.stock];
+        const start = startQ?.price ?? room.startPrices[p.stock];
+        const liveQ = live[p.stock]?.scoring;
         const moveBps =
-          start && liveQ ? Math.round(((liveQ.price - start) / start) * 10_000) : 0;
+          start && liveQ && start > 0 ? moveBpsFromPrices(start, liveQ.price) : 0;
         return { ...p, start, liveQ, moveBps };
       })
       .sort((a, b) => b.moveBps - a.moveBps);
   }, [room, live]);
+
+  const feedBanner = useMemo(() => {
+    const qs = stocksInPlay.map((id) => live[id]?.scoring).filter(Boolean) as MarketQuote[];
+    if (!qs.length) return null;
+    const worst = qs.reduce((a, b) => (a.publishTime < b.publishTime ? a : b));
+    return formatMarketStatusLine(worst);
+  }, [live, stocksInPlay]);
 
   async function handleReady() {
     if (!playerId) return;
@@ -127,8 +206,21 @@ function PitContent() {
         <div className="flex flex-col gap-2">
           <h1 className="display-type text-4xl leading-none">LIVE</h1>
           <p className="font-mono text-sm text-pit-muted">
-            {room.name} · {room.players.length} fighters
+            {room.name} · {formatStakeUsd(room.stakeMicro)} · {room.players.length} fighters
           </p>
+          {feedBanner && (
+            <p
+              className={`font-mono text-xs ${
+                feedBanner.includes("FEED STALE")
+                  ? "text-pit-red"
+                  : feedBanner.includes("QUIET")
+                    ? "text-amber-400/90"
+                    : "text-pit-green"
+              }`}
+            >
+              {feedBanner}
+            </p>
+          )}
         </div>
         {room.status === "locked" && (
           <p className="display-type w-full text-center text-5xl leading-none text-pit-green sm:text-left sm:text-6xl">
@@ -168,15 +260,40 @@ function PitContent() {
                   }`}
                 >
                   <span className="text-pit-muted md:hidden">Move </span>
-                  {row.start ? formatBps(row.moveBps) : "—"}
+                  {row.start && row.liveQ ? formatMoveDisplay(row.moveBps) : "—"}
                 </span>
                 <span className="text-pit-muted md:text-right">
                   <span className="md:hidden">Start </span>
-                  {row.start ? formatUsd(row.start) : "—"}
+                  {row.start ? (
+                    <>
+                      {formatUsdPit(row.start)}
+                      {room.startQuotes[row.stock]?.priceSource && (
+                        <span className="ml-1 text-[10px] text-pit-muted">
+                          {formatPriceSourceLabel(room.startQuotes[row.stock]!.priceSource)}
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    "—"
+                  )}
                 </span>
                 <span className="text-white md:text-right">
-                  <span className="text-pit-muted md:hidden">Live </span>
-                  {row.liveQ ? formatUsd(row.liveQ.price) : "…"}
+                  <span className="md:hidden">Live </span>
+                  {row.liveQ ? (
+                    <span className="inline-flex flex-col items-end gap-0.5">
+                      <span className="inline-flex flex-wrap items-baseline justify-end gap-x-1.5 gap-y-0">
+                        <span>{formatUsdPit(row.liveQ.price)}</span>
+                        <span className="font-mono text-[10px] text-pit-green md:text-xs">
+                          {formatPriceSourceLabel(row.liveQ.priceSource)}
+                        </span>
+                      </span>
+                      <span className="text-[10px] text-pit-muted md:text-xs">
+                        {formatMarketStatusLine(row.liveQ)}
+                      </span>
+                    </span>
+                  ) : (
+                    "…"
+                  )}
                 </span>
               </div>
             </li>
@@ -184,20 +301,40 @@ function PitContent() {
         </ul>
       </div>
 
-      <details className="border border-pit-border bg-pit-card">
+      <details open className="border border-pit-border bg-pit-card">
         <summary className="cursor-pointer px-4 py-3 font-mono text-sm text-pit-muted">
           Pyth feeds ({stocksInPlay.length} tickers)
         </summary>
         <div className="grid grid-cols-1 gap-px border-t border-pit-border bg-pit-border">
           {stocksInPlay.map((id) => {
-            const q = live[id];
+            const q = live[id]?.quotes;
+            const scoring = live[id]?.scoring;
             const start = room.startPrices[id];
             return (
               <div key={id} className="bg-pit-bg p-3">
-                <p className="display-type mb-2 text-lg">{STOCKS[id].label}</p>
+                <p className="display-type mb-2 text-lg">
+                  {STOCKS[id].label}
+                  {scoring && (
+                    <span className="ml-2 font-mono text-xs text-pit-muted">
+                      {formatMarketStatusLine(scoring)}
+                    </span>
+                  )}
+                </p>
+                {scoring && (
+                  <p className="mb-2 font-mono text-sm text-white">
+                    Official {formatUsdPit(scoring.price)}{" "}
+                    <span className="text-pit-green">{formatPriceSourceLabel(scoring.priceSource)}</span>
+                  </p>
+                )}
+                <div className="mb-3 border border-pit-border/50 bg-pit-bg/50 px-3 py-2">
+                  <p className="mb-1 font-mono text-[10px] uppercase tracking-wider text-pit-muted">
+                    1m tape (last 3 · display only)
+                  </p>
+                  <MiniCandles candles={lastCandles(tapeCandles[id] ?? [], 3)} />
+                </div>
                 <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                  <PriceFeed label="Scoring" quote={q?.crypto ?? null} startPrice={start} />
-                  <PriceFeed label="Equity" quote={q?.equity ?? null} />
+                  <PriceFeed label="Pyth crypto (ref)" quote={q?.crypto ?? null} startPrice={start} />
+                  <PriceFeed label="Pyth equity (ref)" quote={q?.equity ?? null} />
                 </div>
               </div>
             );
@@ -210,6 +347,8 @@ function PitContent() {
       )}
 
       {showStickyReady && <StickyReadyBar busy={readyBusy} onReady={handleReady} />}
+
+      <ResultOutcomeToast />
     </div>
   );
 }

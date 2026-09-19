@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { CREATE_ROOM_SIZES, StockId } from "@/lib/constants";
+import { StockId } from "@/lib/constants";
 import { displayNamesForWallets } from "@/lib/display-names";
 import { withDbAsync } from "@/lib/db";
 import { parseRoomId } from "@/lib/room-url";
@@ -33,20 +33,10 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const id = roomIdFrom(req);
   const body = (await req.json()) as {
-    action: "join" | "reset" | "ready" | "create";
+    action: "join" | "reset" | "ready";
     wallet?: string;
     stock?: StockId;
-    maxPlayers?: number;
   };
-
-  if (body.action === "create") {
-    const max = body.maxPlayers === 8 ? 8 : 5;
-    if (!CREATE_ROOM_SIZES.includes(max as 5 | 8)) {
-      return NextResponse.json({ error: "maxPlayers must be 5 or 8" }, { status: 400 });
-    }
-    const room = await roomStore.create(max as 5 | 8);
-    return NextResponse.json({ room });
-  }
 
   if (body.action === "reset") {
     const room = await roomStore.reset(id);

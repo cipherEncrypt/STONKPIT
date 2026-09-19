@@ -1,7 +1,8 @@
 import { DEFAULT_ROOM_ID } from "./constants";
+import { isPitRoomId } from "./room-names";
 
 export function parseRoomId(raw: string | null | undefined): string {
-  if (raw && /^\d+$/.test(raw)) return raw;
+  if (raw && isPitRoomId(raw)) return raw;
   return DEFAULT_ROOM_ID;
 }
 

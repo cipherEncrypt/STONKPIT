@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ensureWallet, getBalanceSync, listDepositsForPubkey } from "@/lib/credits";
+import {
+  ensureWallet,
+  getBalanceSync,
+  listDepositsForPubkey,
+  listWithdrawalsForPubkey,
+} from "@/lib/credits";
 import { withDbAsync } from "@/lib/db";
 import { publicTreasuryAddress } from "@/lib/deposit";
 import { isDemoPlayer } from "@/lib/player-id";
@@ -23,6 +28,7 @@ export async function GET(req: NextRequest) {
         frozenMicro: 0,
       },
       deposits: [],
+      withdrawals: [],
       treasury: publicTreasuryAddress(),
       isWallet: false,
     });
@@ -34,6 +40,7 @@ export async function GET(req: NextRequest) {
     return {
       balance: getBalanceSync(state, pubkey),
       deposits: listDepositsForPubkey(state, pubkey),
+      withdrawals: listWithdrawalsForPubkey(state, pubkey),
       username: row?.username ?? null,
     };
   });

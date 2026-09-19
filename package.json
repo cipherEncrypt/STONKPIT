@@ -4,10 +4,14 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:clean": "rm -rf .next && next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "payout": "tsx scripts/payout-pending.ts",
+    "test": "tsx tests/audit.test.ts && tsx tests/withdraw.test.ts",
+    "pyth:ping": "tsx scripts/pyth-ping.ts",
+    "price:ping": "tsx scripts/price-ping.ts",
     "pre-push-check": "bash scripts/pre-push-check.sh"
   },
   "dependencies": {
@@ -24,7 +28,8 @@
     "clsx": "^2.1.1",
     "next": "^14.2.32",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "@types/node": "^20.19.17",

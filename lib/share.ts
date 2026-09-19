@@ -1,16 +1,30 @@
 import { STOCKS } from "./constants";
+import { topTieGroup } from "./final-results";
 import { displayPlayer } from "./player-id";
 import { RankedResult } from "./payout-preview";
-import { formatBps } from "./scoring";
+import { formatBpsHero } from "./scoring";
 
-/** Share card — 1st place only */
+function labelFor(wallet: string, displayNames?: Record<string, string>): string {
+  return displayNames?.[wallet] ?? displayPlayer(wallet);
+}
+
+/** Share card — tie-aware */
 export function buildShareCard(
   ranked: RankedResult[],
   displayNames?: Record<string, string>,
 ): string {
   if (!ranked.length) return "StonkPit — pick a stock, best % move wins.";
-  const first = ranked.find((r) => r.rank === 1) ?? ranked[0];
-  const name = displayNames?.[first.wallet] ?? displayPlayer(first.wallet);
-  const label = STOCKS[first.stock].label;
-  return `${name}'s ${label} ${formatBps(first.scoreBps)} wins StonkPit`;
+
+  const tie = topTieGroup(ranked);
+  const bpsLabel = formatBpsHero(tie[0]?.scoreBps ?? 0);
+
+  if (tie.length >= 2) {
+    const names = tie.map((r) => labelFor(r.wallet, displayNames)).join(" and ");
+    return `${names} TIE at ${bpsLabel}`;
+  }
+
+  const first = tie[0];
+  const name = labelFor(first.wallet, displayNames);
+  const ticker = STOCKS[first.stock].label;
+  return `${name}'s ${ticker} ${bpsLabel} wins StonkPit`;
 }

@@ -52,13 +52,6 @@ export const STOCKS: Record<
 export const DEFAULT_ROOM_ID = "1";
 
 export const MIN_PLAYERS = 2;
-/** Global cap for created rooms */
-export const MAX_PLAYERS = 32;
-/** Room 1 default quick pit */
-export const DEFAULT_QUICK_PIT_SEATS = 5;
-export const CREATE_ROOM_SIZES = [5, 8] as const;
-export type CreateRoomSize = (typeof CREATE_ROOM_SIZES)[number];
-export const STAKE_USDC = 1;
 export const FEE_BPS = 300;
 
 /** Re-export — server reads ROOM_DURATION from env. */

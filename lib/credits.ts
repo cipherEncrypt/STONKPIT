@@ -1,13 +1,9 @@
-import { computeRankedPayouts, payoutPercents } from "./payout-preview";
-import { ledgerId, WalletRow, withDbAsync } from "./db";
+import { computeSettlement } from "./payout-preview";
+import { ledgerId, WalletRow, withdrawalId, withDbAsync } from "./db";
 import { isDemoPlayer } from "./player-id";
 import { PlayerResult } from "./room-store";
-import {
-  formatUsdcMicro,
-  microToUsdc,
-  STAKE_MICRO,
-  usdcToMicro,
-} from "./usdc";
+import { formatStakeUsd } from "./format-stake";
+import { microToUsdc, usdcToMicro } from "./usdc";
 
 export const TREASURY_LEDGER_PUBKEY = "treasury";
 
@@ -77,30 +73,63 @@ export function freezeForJoin(
   },
   pubkey: string,
   roomId: string,
+  stakeMicro: number,
+  roomName: string,
 ): { ok: true } | { ok: false; error: string } {
   if (isDemoPlayer(pubkey)) return { ok: true };
 
   ensureWallet(state, pubkey);
   const bal = state.wallets[pubkey];
-  if (bal.available < STAKE_MICRO) {
+  if (bal.available < stakeMicro) {
     return {
       ok: false,
-      error: `Insufficient credits. Need ${formatUsdcMicro(STAKE_MICRO)} available.`,
+      error: `Need ${formatStakeUsd(stakeMicro)} for ${roomName}.`,
     };
   }
-  bal.available -= STAKE_MICRO;
-  bal.frozen += STAKE_MICRO;
+  bal.available -= stakeMicro;
+  bal.frozen += stakeMicro;
   bal.updatedAt = Date.now();
   state.ledger.push({
     id: ledgerId(),
     pubkey,
     type: "join_freeze",
-    amount: -STAKE_MICRO,
+    amount: -stakeMicro,
     roomId,
     ref: null,
     createdAt: Date.now(),
   });
   return { ok: true };
+}
+
+/** Return frozen seat stakes when a pit resets before settlement. */
+export function refundFrozenStakes(
+  state: {
+    wallets: Record<string, WalletRow>;
+    ledger: import("./db").LedgerRow[];
+  },
+  roomId: string,
+  wallets: string[],
+  stakeMicro: number,
+): void {
+  for (const pubkey of wallets) {
+    if (isDemoPlayer(pubkey)) continue;
+    ensureWallet(state, pubkey);
+    const bal = state.wallets[pubkey];
+    const release = Math.min(bal.frozen, stakeMicro);
+    if (release <= 0) continue;
+    bal.frozen -= release;
+    bal.available += release;
+    bal.updatedAt = Date.now();
+    state.ledger.push({
+      id: ledgerId(),
+      pubkey,
+      type: "unfreeze",
+      amount: release,
+      roomId,
+      ref: "room_reset",
+      createdAt: Date.now(),
+    });
+  }
 }
 
 export function creditDeposit(
@@ -160,83 +189,58 @@ export function applySettleCredits(
   },
   roomId: string,
   results: PlayerResult[],
+  stakeMicro: number,
 ): SettleCreditsResult | null {
   if (state.settledRooms[roomId]) return null;
 
-  const walletResults = results.filter((r) => !isDemoPlayer(r.wallet));
-  const n = walletResults.length;
+  const settlement = computeSettlement(results, stakeMicro);
+  const { walletPayoutsMicro, creditDeltasMicro, treasuryMicro, n } = settlement;
+
   if (!n) {
     state.settledRooms[roomId] = true;
     return { payouts: {}, creditDeltas: {}, feeMicro: 0 };
   }
 
-  const rankedAll = computeRankedPayouts(results);
-  const pcts = payoutPercents(n);
-  const poolMicro = Math.round(n * STAKE_MICRO * 0.97);
-  const feeMicro = n * STAKE_MICRO - poolMicro;
-
-  for (const wr of walletResults) {
+  for (const wr of results.filter((r) => !isDemoPlayer(r.wallet))) {
     ensureWallet(state, wr.wallet);
     const bal = state.wallets[wr.wallet];
-    if (bal.frozen >= STAKE_MICRO) bal.frozen -= STAKE_MICRO;
+    if (bal.frozen >= stakeMicro) bal.frozen -= stakeMicro;
     else bal.frozen = 0;
     bal.updatedAt = Date.now();
   }
 
   const payouts: Record<string, number> = {};
   const creditDeltas: Record<string, number> = {};
-  const unclaimedMicro = new Map<number, number>();
 
-  for (const row of rankedAll) {
-    if (isDemoPlayer(row.wallet)) {
-      const slot = row.rank - 1;
-      const placePct = slot < pcts.length ? pcts[slot] : 0;
-      if (placePct > 0) {
-        const placeMicro = Math.round(poolMicro * (placePct / 100));
-        unclaimedMicro.set(row.rank, (unclaimedMicro.get(row.rank) ?? 0) + placeMicro);
-      }
-      continue;
-    }
-
-    const bal = state.wallets[row.wallet];
-
-    const slot = row.rank - 1;
-    const placePct = slot < pcts.length ? pcts[slot] : 0;
-    const tiedAtRank = rankedAll.filter((r) => r.rank === row.rank && !isDemoPlayer(r.wallet));
-    const payoutMicro = tiedAtRank.length
-      ? Math.round((poolMicro * (placePct / 100)) / tiedAtRank.length)
-      : 0;
-
-    payouts[row.wallet] = microToUsdc(payoutMicro);
-    creditDeltas[row.wallet] = microToUsdc(payoutMicro - STAKE_MICRO);
+  for (const [wallet, payoutMicro] of Object.entries(walletPayoutsMicro)) {
+    const bal = state.wallets[wallet];
+    payouts[wallet] = microToUsdc(payoutMicro);
+    creditDeltas[wallet] = microToUsdc(creditDeltasMicro[wallet]);
     bal.available += payoutMicro;
     bal.updatedAt = Date.now();
 
     if (payoutMicro > 0) {
       state.ledger.push({
         id: ledgerId(),
-        pubkey: row.wallet,
+        pubkey: wallet,
         type: "payout",
         amount: payoutMicro,
         roomId,
-        ref: `rank_${row.rank}`,
+        ref: null,
         createdAt: Date.now(),
       });
     }
   }
 
-  let treasuryExtra = feeMicro;
-  for (const micro of unclaimedMicro.values()) treasuryExtra += micro;
-
-  if (treasuryExtra > 0) {
+  if (treasuryMicro > 0) {
     touchWallet(state, TREASURY_LEDGER_PUBKEY);
-    state.wallets[TREASURY_LEDGER_PUBKEY].available += treasuryExtra;
+    state.wallets[TREASURY_LEDGER_PUBKEY].available += treasuryMicro;
     state.wallets[TREASURY_LEDGER_PUBKEY].updatedAt = Date.now();
     state.ledger.push({
       id: ledgerId(),
       pubkey: TREASURY_LEDGER_PUBKEY,
       type: "fee",
-      amount: treasuryExtra,
+      amount: treasuryMicro,
       roomId,
       ref: null,
       createdAt: Date.now(),
@@ -244,7 +248,7 @@ export function applySettleCredits(
   }
 
   state.settledRooms[roomId] = true;
-  return { payouts, creditDeltas, feeMicro: treasuryExtra };
+  return { payouts, creditDeltas, feeMicro: treasuryMicro };
 }
 
 export async function getBalance(pubkey: string): Promise<BalanceView> {
@@ -264,48 +268,94 @@ export async function getBalance(pubkey: string): Promise<BalanceView> {
   });
 }
 
-export async function requestWithdraw(
+export type WithdrawalView = {
+  id: string;
+  amount: number;
+  amountMicro: number;
+  status: "pending" | "sent" | "failed";
+  outSignature: string | null;
+  createdAt: number;
+  sentAt: number | null;
+};
+
+/**
+ * Ledger-only withdraw — moves available → pending. Caller must verify wallet signature.
+ * Never accepts a destination other than pubkey (on-chain send uses row.pubkey only).
+ */
+export function requestWithdrawMicro(
+  state: {
+    wallets: Record<string, WalletRow>;
+    withdrawals: import("./db").WithdrawalRow[];
+    ledger: import("./db").LedgerRow[];
+  },
   pubkey: string,
-  amountUsdc: number,
-): Promise<{ ok: true; withdrawalId: string } | { ok: false; error: string }> {
+  amountMicro: number,
+): { ok: true; withdrawalId: string } | { ok: false; error: string } {
   if (isDemoPlayer(pubkey)) {
     return { ok: false, error: "Connect a wallet to withdraw USDC." };
   }
-  const amountMicro = usdcToMicro(amountUsdc);
-  if (amountMicro <= 0) return { ok: false, error: "Amount must be positive." };
+  if (!Number.isInteger(amountMicro) || amountMicro <= 0) {
+    return { ok: false, error: "Amount must be a positive integer (micro-USDC)." };
+  }
 
-  return withDbAsync((state) => {
-    ensureWallet(state, pubkey);
-    const bal = state.wallets[pubkey];
-    if (bal.available < amountMicro) {
-      return {
-        ok: false as const,
-        error: `Only ${formatUsdcMicro(bal.available)} available.`,
-      };
-    }
-    bal.available -= amountMicro;
-    bal.updatedAt = Date.now();
-    const id = `w_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-    state.withdrawals.push({
-      id,
-      pubkey,
-      amount: amountMicro,
-      status: "pending",
-      outSignature: null,
-      createdAt: Date.now(),
-      sentAt: null,
-    });
-    state.ledger.push({
-      id: ledgerId(),
-      pubkey,
-      type: "withdraw_request",
-      amount: -amountMicro,
-      roomId: null,
-      ref: id,
-      createdAt: Date.now(),
-    });
-    return { ok: true as const, withdrawalId: id };
+  ensureWallet(state, pubkey);
+  const bal = state.wallets[pubkey];
+  if (amountMicro > bal.available) {
+    return {
+      ok: false,
+      error: `Only ${microToUsdc(bal.available).toFixed(2)} USDC available (${bal.frozen > 0 ? `${microToUsdc(bal.frozen).toFixed(2)} frozen in pits` : "no frozen stake"}).`,
+    };
+  }
+
+  bal.available -= amountMicro;
+  bal.updatedAt = Date.now();
+  const id = withdrawalId();
+  state.withdrawals.push({
+    id,
+    pubkey,
+    amount: amountMicro,
+    status: "pending",
+    outSignature: null,
+    createdAt: Date.now(),
+    sentAt: null,
   });
+  state.ledger.push({
+    id: ledgerId(),
+    pubkey,
+    type: "withdraw_request",
+    amount: -amountMicro,
+    roomId: null,
+    ref: id,
+    createdAt: Date.now(),
+  });
+  return { ok: true, withdrawalId: id };
+}
+
+export async function requestWithdrawMicroAsync(
+  pubkey: string,
+  amountMicro: number,
+): Promise<{ ok: true; withdrawalId: string } | { ok: false; error: string }> {
+  return withDbAsync((state) => requestWithdrawMicro(state, pubkey, amountMicro));
+}
+
+export function listWithdrawalsForPubkey(
+  state: { withdrawals: import("./db").WithdrawalRow[] },
+  pubkey: string,
+  limit = 20,
+): WithdrawalView[] {
+  return state.withdrawals
+    .filter((w) => w.pubkey === pubkey)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, limit)
+    .map((w) => ({
+      id: w.id,
+      amount: microToUsdc(w.amount),
+      amountMicro: w.amount,
+      status: w.status,
+      outSignature: w.outSignature,
+      createdAt: w.createdAt,
+      sentAt: w.sentAt,
+    }));
 }
 
 export function listDepositsForPubkey(

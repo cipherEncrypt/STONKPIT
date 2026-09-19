@@ -3,11 +3,11 @@
 import { Suspense, useState } from "react";
 import Link from "next/link";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
+import type { WithdrawalView } from "@/lib/credits";
 import { PublicKey } from "@solana/web3.js";
 import dynamic from "next/dynamic";
 import { useCredits } from "@/components/useCredits";
 import { buildUsdcDepositTransaction } from "@/lib/build-deposit-tx";
-import { USDC_MINT } from "@/lib/constants";
 import { shortPubkey } from "@/lib/format-short";
 
 const WalletMultiButton = dynamic(
@@ -21,9 +21,10 @@ function solscanTx(sig: string) {
 
 function WalletContent() {
   const { connection } = useConnection();
-  const { publicKey, connected, sendTransaction } = useWallet();
+  const { publicKey, connected, sendTransaction, signMessage } = useWallet();
   const pubkey = connected && publicKey ? publicKey.toBase58() : null;
-  const { balance, deposits, treasury, error, confirmDeposit, withdraw } = useCredits(pubkey);
+  const { balance, deposits, withdrawals, treasury, error, confirmDeposit, withdraw } =
+    useCredits(pubkey);
 
   const [depositAmt, setDepositAmt] = useState("1.00");
   const [withdrawAmt, setWithdrawAmt] = useState("");
@@ -59,18 +60,28 @@ function WalletContent() {
   async function handleWithdraw() {
     const amt = parseFloat(withdrawAmt);
     if (!Number.isFinite(amt) || amt <= 0) return;
+    if (!signMessage) {
+      setErr("Wallet does not support message signing.");
+      return;
+    }
     setBusy(true);
     setErr(null);
     setMsg(null);
     try {
-      await withdraw(amt);
-      setMsg("Withdrawal queued. Treasury sends USDC on-chain.");
+      await withdraw(amt, signMessage);
+      setMsg("Withdrawal queued. USDC will arrive in this wallet on-chain.");
       setWithdrawAmt("");
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Withdraw failed");
     } finally {
       setBusy(false);
     }
+  }
+
+  function withdrawStatusLabel(w: WithdrawalView): string {
+    if (w.status === "pending") return "pending";
+    if (w.status === "failed") return "failed — credits restored";
+    return "sent";
   }
 
   if (!connected || !pubkey) {
@@ -93,14 +104,14 @@ function WalletContent() {
   return (
     <div className="space-y-6">
       <div className="border-b border-pit-border pb-5">
-        <Link href="/" className="font-mono text-sm text-pit-muted">
-          ← Lobby
+        <Link href="/rooms" className="font-mono text-sm text-pit-muted">
+          ← Rooms
         </Link>
         <h1 className="display-type mt-2 text-4xl sm:text-5xl">Wallet</h1>
         <p className="mt-2 break-all font-mono text-sm text-pit-green sm:hidden">{shortPubkey(pubkey)}</p>
         <p className="mt-2 hidden break-all font-mono text-sm text-pit-green sm:block">{pubkey}</p>
         <p className="mt-1 font-mono text-sm text-pit-muted">
-          Custodial credits · 1:1 USDC · mainnet-beta
+          Escrow-backed credits · 1:1 USDC · mainnet-beta
         </p>
       </div>
 
@@ -128,18 +139,13 @@ function WalletContent() {
       <section className="border border-pit-border bg-pit-card p-5">
         <p className="terminal-label">Deposit USDC</p>
         <p className="mt-2 font-mono text-sm text-pit-muted">
-          Signs a real SPL transfer to treasury. Server verifies on-chain before crediting.
+          Sign an on-chain USDC transfer into pit escrow. We verify the transfer before crediting.
         </p>
-        {treasury ? (
-          <p className="mt-2 break-all font-mono text-sm text-pit-muted">
-            Treasury: <span className="text-pit-green">{treasury}</span>
-          </p>
-        ) : (
+        {!treasury && (
           <p className="mt-2 font-mono text-sm text-pit-red">
-            Set TREASURY_USDC_ADDRESS in .env
+            Deposits are temporarily unavailable. Try again later.
           </p>
         )}
-        <p className="font-mono text-sm text-pit-muted">Mint: {USDC_MINT}</p>
         <div className="mt-4 flex flex-col gap-3">
           <input
             type="number"
@@ -165,7 +171,9 @@ function WalletContent() {
       <section className="border border-pit-border bg-pit-card p-5">
         <p className="terminal-label">Withdraw</p>
         <p className="mt-2 font-mono text-sm text-pit-muted">
-          Request USDC back to this wallet. Pending until treasury sends on-chain.
+          Request USDC back to this wallet only. You sign a withdraw message; only{" "}
+          <span className="text-white">available</span> credits can leave (frozen pit stakes
+          cannot). Pending until escrow sends on-chain.
         </p>
         <div className="mt-4 flex flex-col gap-3">
           <input
@@ -189,6 +197,45 @@ function WalletContent() {
           </button>
         </div>
       </section>
+
+      {withdrawals.length > 0 && (
+        <section className="border border-pit-border bg-pit-card p-5">
+          <p className="terminal-label">Withdrawals</p>
+          <ul className="mt-3 space-y-2 font-mono text-sm">
+            {withdrawals.map((w) => (
+              <li
+                key={w.id}
+                className="flex flex-wrap items-center justify-between gap-2 border-b border-pit-border/30 pb-2"
+              >
+                <span className="text-white">{w.amount.toFixed(2)} USDC</span>
+                <span
+                  className={
+                    w.status === "sent"
+                      ? "text-pit-green"
+                      : w.status === "failed"
+                        ? "text-pit-red"
+                        : "text-pit-muted"
+                  }
+                >
+                  {withdrawStatusLabel(w)}
+                </span>
+                {w.outSignature ? (
+                  <a
+                    href={solscanTx(w.outSignature)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="truncate text-pit-muted"
+                  >
+                    Solscan · {w.outSignature.slice(0, 8)}…
+                  </a>
+                ) : (
+                  <span className="text-pit-muted">awaiting payout</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {deposits.length > 0 && (
         <section className="border border-pit-border bg-pit-card p-5">

@@ -1,5 +1,6 @@
 /**
- * Admin: send pending USDC withdrawals from treasury.
+ * SERVER-ONLY admin: send pending USDC withdrawals from treasury.
+ * Never import this file from app/ or components/.
  *
  * Usage:
  *   TREASURY_PRIVATE_KEY=<base58> \
@@ -8,8 +9,6 @@
  *   npm run payout
  */
 
-import fs from "fs";
-import path from "path";
 import {
   Connection,
   Keypair,
@@ -23,41 +22,22 @@ import {
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import bs58 from "bs58";
+import type { WithdrawalRow } from "../lib/db";
+import {
+  assertPayoutScriptOnly,
+  runPayoutUntilEmpty,
+  USDC_MINT_MAINNET,
+} from "../lib/payout-withdrawals";
 
-const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 const USDC_DECIMALS = 6;
 
-type DbState = {
-  withdrawals: Array<{
-    id: string;
-    pubkey: string;
-    amount: number;
-    status: string;
-    outSignature: string | null;
-    sentAt: number | null;
-  }>;
-};
-
-function dbPath(): string {
-  const raw = process.env.DATABASE_PATH;
-  if (raw) return path.resolve(raw);
-  return path.resolve(process.cwd(), "data", "stonkpit.json");
-}
-
-function loadDb(): DbState {
-  const file = dbPath();
-  if (!fs.existsSync(file)) throw new Error(`DB not found: ${file}`);
-  return JSON.parse(fs.readFileSync(file, "utf8")) as DbState;
-}
-
-function saveDb(state: DbState): void {
-  const file = dbPath();
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-  fs.renameSync(tmp, file);
+if (process.env.NEXT_RUNTIME) {
+  throw new Error("payout-pending.ts must not run inside the Next.js server");
 }
 
 async function main() {
+  assertPayoutScriptOnly();
+
   const pk = process.env.TREASURY_PRIVATE_KEY;
   const treasuryAddr = process.env.TREASURY_USDC_ADDRESS;
   const rpc =
@@ -66,8 +46,12 @@ async function main() {
     process.env.SOLANA_RPC_URL ??
     "https://api.mainnet-beta.solana.com";
 
-  if (!pk || !treasuryAddr) {
-    console.error("Set TREASURY_PRIVATE_KEY and TREASURY_USDC_ADDRESS");
+  if (!pk) {
+    console.error("TREASURY_PRIVATE_KEY missing — exit without sending.");
+    process.exit(1);
+  }
+  if (!treasuryAddr) {
+    console.error("TREASURY_USDC_ADDRESS missing — exit without sending.");
     process.exit(1);
   }
 
@@ -76,48 +60,45 @@ async function main() {
     console.warn("Warning: key pubkey does not match TREASURY_USDC_ADDRESS");
   }
 
-  const state = loadDb();
-  const pending = state.withdrawals.filter((w) => w.status === "pending");
-  if (!pending.length) {
-    console.log("No pending withdrawals.");
-    return;
-  }
-
   const connection = new Connection(rpc, "confirmed");
-  const treasuryAta = getAssociatedTokenAddressSync(USDC_MINT, treasury.publicKey);
+  const usdcMint = new PublicKey(USDC_MINT_MAINNET);
+  const treasuryAta = getAssociatedTokenAddressSync(usdcMint, treasury.publicKey);
 
-  const batch = pending.slice(0, 5);
-  const tx = new Transaction();
+  const sendOne = async (row: WithdrawalRow): Promise<string> => {
+    if (row.outSignature) {
+      throw new Error(`Withdrawal ${row.id} already has outSignature`);
+    }
+    if (row.status !== "pending") {
+      throw new Error(`Withdrawal ${row.id} is not pending`);
+    }
+    if (!Number.isInteger(row.amount) || row.amount <= 0) {
+      throw new Error(`Invalid withdrawal amount for ${row.id}`);
+    }
 
-  for (const w of batch) {
-    const dest = new PublicKey(w.pubkey);
-    const destAta = getAssociatedTokenAddressSync(USDC_MINT, dest);
-    tx.add(
+    const dest = new PublicKey(row.pubkey);
+    const destAta = getAssociatedTokenAddressSync(usdcMint, dest);
+    const tx = new Transaction().add(
       createTransferCheckedInstruction(
         treasuryAta,
-        USDC_MINT,
+        usdcMint,
         destAta,
         treasury.publicKey,
-        w.amount,
+        row.amount,
         USDC_DECIMALS,
         [],
         TOKEN_PROGRAM_ID,
       ),
     );
-  }
 
-  const sig = await sendAndConfirmTransaction(connection, tx, [treasury]);
-  const now = Date.now();
-  for (const w of batch) {
-    const row = state.withdrawals.find((x) => x.id === w.id);
-    if (row) {
-      row.status = "sent";
-      row.outSignature = sig;
-      row.sentAt = now;
-    }
+    return sendAndConfirmTransaction(connection, tx, [treasury]);
+  };
+
+  const sent = await runPayoutUntilEmpty(sendOne);
+  if (sent === 0) {
+    console.log("No pending withdrawals.");
+  } else {
+    console.log(`Sent ${sent} withdrawal(s).`);
   }
-  saveDb(state);
-  console.log(`Sent ${batch.length} withdrawal(s). Signature: ${sig}`);
 }
 
 main().catch((e) => {

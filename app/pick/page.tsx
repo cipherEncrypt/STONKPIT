@@ -10,7 +10,9 @@ import { usePlayerId } from "@/components/usePlayerId";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { useRoom } from "@/components/useRoom";
 import { useRoomId } from "@/components/useRoomId";
-import { STAKE_USDC, STOCKS, StockId } from "@/lib/constants";
+import { STOCKS, StockId } from "@/lib/constants";
+import { formatStakeUsd } from "@/lib/format-stake";
+import { microToUsdc } from "@/lib/usdc";
 import { PythQuote } from "@/lib/pyth";
 import { roomHref } from "@/lib/room-url";
 
@@ -28,7 +30,7 @@ function PickContent() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const lobbyHref = roomHref("/", roomId);
+  const lobbyHref = roomHref("/rooms", roomId);
 
   useEffect(() => {
     if (room?.status === "locked") router.replace(roomHref("/pit", roomId));
@@ -65,13 +67,15 @@ function PickContent() {
   }
 
   const roomName = room?.name ?? "Pit";
+  const stakeMicro = room?.stakeMicro ?? 1_000_000;
+  const stakeUsdc = microToUsdc(stakeMicro);
   const max = room?.maxPlayers ?? 5;
   const full = (room?.players.length ?? 0) >= max;
   const canJoin =
     !!selected &&
     !busy &&
     !full &&
-    (isDemo || balance == null || balance.available >= STAKE_USDC);
+    (isDemo || balance == null || balance.available >= stakeUsdc);
 
   if (!canPlay) {
     return (
@@ -79,7 +83,7 @@ function PickContent() {
         <p className="font-mono text-sm text-pit-muted">{roomName}</p>
         {!connected ? (
           <p className="mt-3 font-mono text-sm text-pit-muted">
-            <Link href="/" className="text-pit-green">Connect wallet</Link>
+            <Link href="/rooms" className="text-pit-green">Connect wallet</Link>
             {" · "}
             <Link href="/spectate" className="text-pit-green">
               spectate without money
@@ -87,7 +91,7 @@ function PickContent() {
           </p>
         ) : (
           <p className="mt-3 font-mono text-sm text-pit-muted">
-            <Link href="/" className="text-pit-green">Choose your handle</Link>
+            <Link href="/rooms" className="text-pit-green">Choose your handle</Link>
           </p>
         )}
         <Link href={lobbyHref} className="btn-secondary mt-4 inline-block">← Lobby</Link>
@@ -125,7 +129,7 @@ function PickContent() {
         ) : (
           <>
             {" "}
-            · seat costs {STAKE_USDC.toFixed(2)} USDC
+            · seat costs {formatStakeUsd(stakeMicro)}
             {balance && (
               <>
                 {" "}
@@ -187,8 +191,8 @@ function PickContent() {
         >
           {full
             ? "PIT FULL"
-            : !isDemo && balance != null && balance.available < STAKE_USDC
-              ? "NEED USDC"
+            : !isDemo && balance != null && balance.available < stakeUsdc
+              ? `NEED ${formatStakeUsd(stakeMicro)}`
               : busy
                 ? "JOINING…"
                 : selected
@@ -206,8 +210,8 @@ function PickContent() {
         >
           {full
             ? "PIT FULL"
-            : !isDemo && balance != null && balance.available < STAKE_USDC
-              ? "NEED USDC"
+            : !isDemo && balance != null && balance.available < stakeUsdc
+              ? `NEED ${formatStakeUsd(stakeMicro)}`
               : busy
                 ? "JOINING…"
                 : selected
