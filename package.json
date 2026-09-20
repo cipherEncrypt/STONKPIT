@@ -12,6 +12,7 @@
     "test": "tsx tests/audit.test.ts && tsx tests/withdraw.test.ts",
     "pyth:ping": "tsx scripts/pyth-ping.ts",
     "price:ping": "tsx scripts/price-ping.ts",
+    "db:migrate": "tsx scripts/db-migrate.ts",
     "pre-push-check": "bash scripts/pre-push-check.sh"
   },
   "dependencies": {
@@ -27,12 +28,14 @@
     "bs58": "^5.0.0",
     "clsx": "^2.1.1",
     "next": "^14.2.32",
+    "pg": "^8.16.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
     "@types/node": "^20.19.17",
+    "@types/pg": "^8.15.5",
     "@types/react": "^18.3.24",
     "@types/react-dom": "^18.3.7",
     "autoprefixer": "^10.4.21",

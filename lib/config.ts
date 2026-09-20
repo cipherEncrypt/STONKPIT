@@ -29,7 +29,11 @@ export function roomDurationMs(): number {
 }
 
 export function treasuryAddress(): string | null {
-  return process.env.TREASURY_USDC_ADDRESS ?? null;
+  return (
+    process.env.TREASURY_USDC_ADDRESS ??
+    process.env.NEXT_PUBLIC_TREASURY_USDC_ADDRESS ??
+    null
+  );
 }
 
 export function getAppConfig(): AppConfig {

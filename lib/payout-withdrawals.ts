@@ -6,6 +6,13 @@ import { ledgerId, WithdrawalRow, withDbAsync } from "./db";
 
 export const USDC_MINT_MAINNET = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
+/** In-DB claim token so two payout runners cannot pick the same pending row. */
+export const WITHDRAW_CLAIM_PREFIX = "__claim__:";
+
+function isWithdrawClaimLock(sig: string | null): boolean {
+  return !!sig && sig.startsWith(WITHDRAW_CLAIM_PREFIX);
+}
+
 export type PayoutSendFn = (row: WithdrawalRow) => Promise<string>;
 
 export function assertPayoutScriptOnly(): void {
@@ -26,7 +33,9 @@ export async function claimNextPendingWithdrawal(): Promise<WithdrawalRow | null
     const row = state.withdrawals.find(
       (w) => w.status === "pending" && !w.outSignature,
     );
-    return row ? { ...row } : null;
+    if (!row) return null;
+    row.outSignature = `${WITHDRAW_CLAIM_PREFIX}${row.id}`;
+    return { ...row, outSignature: null };
   });
 }
 
@@ -36,7 +45,8 @@ export async function markWithdrawalSent(
 ): Promise<boolean> {
   return withDbAsync((state) => {
     const row = state.withdrawals.find((w) => w.id === withdrawalId);
-    if (!row || row.status !== "pending" || row.outSignature) return false;
+    if (!row || row.status !== "pending") return false;
+    if (row.outSignature && !isWithdrawClaimLock(row.outSignature)) return false;
     const now = Date.now();
     row.status = "sent";
     row.outSignature = outSignature;
@@ -57,8 +67,10 @@ export async function markWithdrawalSent(
 export async function markWithdrawalFailed(withdrawalId: string): Promise<boolean> {
   return withDbAsync((state) => {
     const row = state.withdrawals.find((w) => w.id === withdrawalId);
-    if (!row || row.status !== "pending" || row.outSignature) return false;
+    if (!row || row.status !== "pending") return false;
+    if (row.outSignature && !isWithdrawClaimLock(row.outSignature)) return false;
     row.status = "failed";
+    row.outSignature = null;
     const bal = state.wallets[row.pubkey];
     if (bal) {
       bal.available += row.amount;

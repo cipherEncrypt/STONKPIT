@@ -2,6 +2,7 @@
  * Production audit tests — credits, DB, payouts, ties.
  * Run: npm test
  */
+import "./force-json-db";
 import fs from "fs";
 import os from "os";
 import path from "path";

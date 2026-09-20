@@ -1,100 +1,99 @@
-# StonkPit Live
+# StonkPit
 
-**Pick a stock. Best Pyth % move wins.** Five fixed-stake pits on Solana mainnet.
+Stock fight on Solana. Connect a wallet. Enter a named room.
+Pick AAPLx, TSLAx, or NVDAx. Best percent move in three minutes wins the pot.
 
-Rules → [`docs/RULES.md`](docs/RULES.md)
+## How a fight works
 
----
+Join a room. Pick a ticker. Hit **READY**.
 
-## Local run
+Two ready players or a full table starts the clock. Everyone shares the same server time.
+
+Prices at lock and settle use one source for the whole fight. **Pyth** when the feed is live.
+**Jupiter** xStock to USDC when Pyth is blocked or stale. Lock and settle always match.
+
+When the timer hits zero the room goes **FINAL**. Rank by percent move. Credits move in the database.
+
+## Rooms
+
+| Room | Seats | Stake |
+|------|-------|-------|
+| Opening Bell | 5 | $1 |
+| After Hours | 5 | $5 |
+| Green Tape | 8 | $10 |
+| Red Pit | 15 | $25 |
+| Tesla Cage | 20 | $50 |
+
+Lobby: **http://localhost:3000/rooms?room=1**
+
+## Money
+
+USDC sits in a treasury wallet. Balances are credits in the database. **3 percent** fee on each pot.
+Withdraw goes back to the same wallet you connected. This is not a program escrow.
+
+## Payout
+
+**n** = paying wallets who actually sat (demo spectate seats do not count).
+**Pot** = n × room stake. Prize pool is pot minus the 3 percent fee (integer math in micro USDC).
+
+| n | Split |
+|---|-------|
+| 2 | winner takes all |
+| 3 | 60 / 30 / 10 |
+| 4-5 | 50 / 30 / 20 |
+
+Ties split the place pots for that rank. Details: [`docs/RULES.md`](docs/RULES.md).
+
+## Run it
+
+**Local (JSON ledger, no Postgres)**
 
 ```bash
 npm install
-cp .env.example .env   # edit with your RPC + treasury pubkey (never commit .env)
-ROOM_DURATION=180 NEXT_PUBLIC_ROOM_DURATION=180 npm run dev
+cp .env.example .env
+# HELIUS_RPC_URL or ALCHEMY_RPC_URL, TREASURY_USDC_ADDRESS, PYTH_API_KEY
+# leave DATABASE_URL unset → writes data/stonkpit.json
+npm run dev
 ```
 
-Open **http://localhost:3000** (home) or **http://localhost:3000/rooms?room=1** (lobby)
+**Live (Vercel app + Render Postgres)**
 
-Check prices: `npm run price:ping` (Pyth age, Jupiter quote, chosen `PYTH` / `JUPITER` / `PYTH_STALE`). Legacy: `npm run pyth:ping`.
+1. Create a Postgres instance on Render. Copy the **pooler** `DATABASE_URL` (SSL required).
+2. On Render or your laptop: `DATABASE_URL=... npm run db:migrate`
+3. In Vercel project env (never commit these):
+   - `DATABASE_URL` (server only, not `NEXT_PUBLIC_`)
+   - `HELIUS_RPC_URL` or `ALCHEMY_RPC_URL`
+   - `TREASURY_USDC_ADDRESS` and `NEXT_PUBLIC_TREASURY_USDC_ADDRESS` (public pubkey only)
+   - `PYTH_API_KEY`
+   - `NEXT_PUBLIC_SITE_URL` or `ALLOWED_ORIGIN` (your Vercel URL, API CORS)
+4. Deploy. First boot imports `data/stonkpit.json` into Postgres if the DB is empty and that file exists on the build machine (usually skip; use migrate from a dev export instead).
 
-If `/` shows 404 or 500, stop all `next dev` processes and run `npm run dev:clean`.
+Run `npm run payout` on a secure admin machine with `TREASURY_PRIVATE_KEY`. Not on Vercel.
 
----
+Open **http://localhost:3000**. Never commit `.env` or paste secret values in issues or chat.
 
-## Five pits
+Quick check without the UI: `npm run price:ping`
 
-| Pit | ID | Seats | Stake |
-|-----|-----|-------|-------|
-| Opening Bell | 1 | 5 | $1 |
-| After Hours | 2 | 5 | $5 |
-| Green Tape | 3 | 8 | $10 |
-| Red Pit | 4 | 15 | $25 |
-| Tesla Cage | 5 | 20 | $50 |
+## Scripts
 
-- **Ready protocol:** Join → pick ticker → **READY** on lobby
-- **Start rule:** All seated ready (n≥2) **or** pit full
-- **Sync:** 1s polling — all tabs see joins, READY, countdown
-- **Prize pool:** n × stake × 97% (3% fee to treasury)
+| Command | What |
+|---------|------|
+| `npm run pyth:ping` | Hermes feed age and key sanity |
+| `npm run price:ping` | Pyth vs Jupiter tier the server would pick |
+| `npm run payout` | Send pending withdrawals (**admin**, needs `TREASURY_PRIVATE_KEY` on the machine only) |
+| `npm test` | Credits, payouts, withdraw guards |
+| `npm run db:migrate` | Create Postgres tables (needs `DATABASE_URL`) |
 
----
+## Safety
 
-## Three-tab demo (Alice / Bob / Cara)
+No private keys in the repo. Treasury **public** address in `.env` only.
+`TREASURY_PRIVATE_KEY` stays on the admin host for `npm run payout`, never in the app bundle.
+No `NEXT_PUBLIC_DATABASE_URL`. No `NEXT_PUBLIC_` for private keys.
+`NEXT_PUBLIC_TREASURY_USDC_ADDRESS` is the public deposit address only.
 
-On `/rooms?room=1` (Opening Bell, $1):
+## Stocklana submit
 
-1. Each tab: demo name → **Join pit** → pick ticker  
-2. Lobby → **READY** (each player)  
-3. When all 3 ready → **LIVE** (3 min fight) on every tab  
-4. `/pit?room=1` — 3:00 countdown, live Pyth tape (2s samples, 1m display candles)  
-5. `/result?room=1` — credit deltas at $1 stake  
+Fill these before you send the form:
 
-6th player cannot join Opening Bell → try **After Hours** (`?room=2`)
-
----
-
-## Routes
-
-| URL | Screen |
-|-----|--------|
-| `/?room=1` | Lobby — pit cards + fight card + READY |
-| `/pick?room=1` | Pick ticker |
-| `/pit?room=1` | LIVE rows + server clock |
-| `/result?room=1` | Ranked table + credit Δ |
-| `/wallet` | Credits, deposit, withdraw |
-
----
-
-## APIs
-
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /api/rooms` | Lobby list (poll 1s) |
-| `GET /api/room?room=` | Room state + `stakeMicro` + `serverNow` + `remainingMs` |
-| `POST` join / ready / reset | Seat, ready, rematch |
-
----
-
-## Env
-
-| Variable | Purpose |
-|----------|---------|
-| `ROOM_DURATION` | Fight length in seconds (server `endTs`; default `180`) |
-| `NEXT_PUBLIC_ROOM_DURATION` | Same value for client labels (keep in sync with `ROOM_DURATION`) |
-| `PYTH_API_KEY` | Hermes bearer token — live Pyth prices (without it, on-chain fallback may be days old) |
-| `PYTH_HERMES_URL` | Optional Hermes host override |
-| `ALCHEMY_RPC_URL` | Solana mainnet RPC (server + wallet via `/api/config`) |
-| `TREASURY_USDC_ADDRESS` | Treasury wallet for USDC deposits |
-| `DATABASE_PATH` | Ledger file (default `data/stonkpit.json`) |
-
----
-
-## Vercel
-
-```bash
-npm run build
-```
-
-Single instance or persistent volume for `data/stonkpit.json`. See README deploy notes in repo.
-
-**Frozen:** `programs/stonkpit/` — do not deploy.
+- **GitHub:** `https://github.com/cipherEncrypt/STONKPIT`
+- **Demo video:** _paste your Loom or YouTube link here_

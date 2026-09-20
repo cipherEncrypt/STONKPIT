@@ -2,7 +2,7 @@
 
 ## One line
 
-Timed pit on **Solana mainnet**. Pick **AAPLx / TSLAx / NVDAx**, scored by **live Pyth % move**. **Custodial credits** — USDC in treasury, balances in DB.
+Timed **three minute** pit on **Solana mainnet**. Pick **AAPLx / TSLAx / NVDAx**, scored by **% move** (Pyth when live, else Jupiter xStock quote). USDC in treasury, playable balance as credits in DB.
 
 ## Landing flow
 
@@ -54,7 +54,7 @@ Lobby cards show **name**, **$stake**, `03 / 05`, OPEN / LIVE / FINAL. Share lin
 score_bps = ((end − start) / start) × 10 000
 ```
 
-Pyth **Crypto.*X/USD** at lock and timer end.
+Same price source at **lock** and **settle** (Pyth if fresh, else Jupiter, else stale on-chain Pyth). Scoring uses that source’s start and end prints.
 
 ## Payout (credits)
 
@@ -101,4 +101,4 @@ Open `/spectate`, set demo names, then join **Opening Bell** (`?room=1`).
 - **Demo spectate:** may join pits for testing — **no freeze, no deposit, no payout**
 - **Join (wallet):** freeze pit stake; reject if available < stake
 - **Withdraw:** `POST /api/wallet/withdraw` → admin `npm run payout`
-- Footer: *USDC for pits and payouts is held in escrow until withdraw or pot settlement.*
+- README money line: USDC in treasury wallet, credits in DB, 3% fee, withdraw to same wallet, not a program escrow.

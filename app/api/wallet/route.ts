@@ -8,6 +8,7 @@ import {
 import { withDbAsync } from "@/lib/db";
 import { publicTreasuryAddress } from "@/lib/deposit";
 import { isDemoPlayer } from "@/lib/player-id";
+import { assertValidPlayerId } from "@/lib/pubkey-valid";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,12 @@ export async function GET(req: NextRequest) {
   const pubkey = req.nextUrl.searchParams.get("pubkey");
   if (!pubkey) {
     return NextResponse.json({ error: "pubkey required" }, { status: 400 });
+  }
+
+  try {
+    assertValidPlayerId(pubkey);
+  } catch {
+    return NextResponse.json({ error: "Invalid wallet pubkey." }, { status: 400 });
   }
 
   if (isDemoPlayer(pubkey)) {

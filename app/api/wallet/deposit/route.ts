@@ -3,6 +3,8 @@ import { creditDeposit } from "@/lib/credits";
 import { withDbAsync } from "@/lib/db";
 import { verifyUsdcDeposit } from "@/lib/deposit";
 import { isDemoPlayer } from "@/lib/player-id";
+import { assertValidPlayerId } from "@/lib/pubkey-valid";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +20,16 @@ export async function POST(req: NextRequest) {
       { error: "Demo names cannot deposit. Connect a Solana wallet." },
       { status: 400 },
     );
+  }
+
+  try {
+    assertValidPlayerId(body.pubkey);
+  } catch {
+    return NextResponse.json({ error: "Invalid wallet pubkey." }, { status: 400 });
+  }
+
+  if (!checkRateLimit("deposit", body.pubkey)) {
+    return NextResponse.json({ error: "Too many deposit attempts. Wait a minute." }, { status: 429 });
   }
 
   const signature = body.signature.trim();

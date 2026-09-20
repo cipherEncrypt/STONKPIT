@@ -3,6 +3,7 @@ import { ensureWallet, getBalanceSync } from "@/lib/credits";
 import { withDbAsync } from "@/lib/db";
 import { isDemoPlayer } from "@/lib/player-id";
 import { setUsernameOnWallet } from "@/lib/username";
+import { assertValidPlayerId } from "@/lib/pubkey-valid";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,12 @@ export async function POST(req: NextRequest) {
 
   if (isDemoPlayer(body.pubkey)) {
     return NextResponse.json({ error: "Demo spectate does not use handles." }, { status: 400 });
+  }
+
+  try {
+    assertValidPlayerId(body.pubkey);
+  } catch {
+    return NextResponse.json({ error: "Invalid wallet pubkey." }, { status: 400 });
   }
 
   const result = await withDbAsync((state) => {

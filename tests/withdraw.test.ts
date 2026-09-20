@@ -1,6 +1,7 @@
 /**
  * Withdraw security tests — run: npm test
  */
+import "./force-json-db";
 import fs from "fs";
 import os from "os";
 import path from "path";
