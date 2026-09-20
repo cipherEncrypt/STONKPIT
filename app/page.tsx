@@ -29,7 +29,7 @@ export default function HomePage() {
   const durationSecs = appConfig?.roomDurationSecs ?? 180;
   const durationLabel =
     durationSecs >= 60
-      ? `${Math.round(durationSecs / 60)}-second`
+      ? `${Math.round(durationSecs / 60)}-minute`
       : `${durationSecs}-second`;
 
   return (
